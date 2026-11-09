@@ -17,7 +17,7 @@ from fixpilot.schemas.execution import ExecutionResult
 from fixpilot.schemas.state import FixPilotState
 from fixpilot.diagnostics.pytest_parser import parse_pytest_output
 
-logger = logging.getLogger("fixpilot.verifier")
+logger = logging.getLogger("fixpalot.verifier")
 
 
 class VerificationError(Exception):
@@ -100,7 +100,6 @@ class Verifier:
         # Also check for regression: tests that passed baseline but fail post-patch
         # (these are tests that were passing before and now fail)
         regression_tests = pre_test_names - baseline_test_names
-        regression_test_names = {f for f in regression_tests}
 
         # Decision logic
         if new_failures:
@@ -114,18 +113,21 @@ class Verifier:
             if unacceptable_new:
                 return {
                     "status": "regression",
-                    "evidence": f"New failures introduced: {', '.join(unacceptable_new)}. "
-                                f"Regression detected - repair introduced new issues.",
+                    "evidence": "New failures introduced: {0}. Regression detected - repair introduced new issues.".format(
+                        ', '.join(unacceptable_new)
+                    ),
                     "new_failures": list(unacceptable_new),
                     "previously_failing_now_passing": list(previously_failing_now_passing),
                 }
 
             # New failures are acceptable, check if original tests still fail
-            if post_test_names - baseline_test_names == set():
+            if not new_failures - set(acceptable_new) if acceptable_new else []:
                 # All failures are new, original tests now pass
                 return {
                     "status": "success",
-                    "evidence": f"Original tests now pass. New failures ({', '.join(new_failures)}) are acceptable.",
+                    "evidence": "Original tests now pass. New failures are acceptable.".format(
+                        ', '.join(new_failures)
+                    ),
                     "new_failures": list(new_failures),
                     "previously_failing_now_passing": list(previously_failing_now_passing),
                 }
@@ -137,8 +139,9 @@ class Verifier:
             # The originally failing tests now pass, and no new failures
             return {
                 "status": "success",
-                "evidence": f"Originally failing tests now pass: {', '.join(original_tests_now_passing)}. "
-                            f"No new failures introduced.",
+                "evidence": "Originally failing tests now pass: {0}. No new failures introduced.".format(
+                    ', '.join(original_tests_now_passing)
+                ),
                 "new_failures": [],
                 "previously_failing_now_passing": list(original_tests_now_passing),
             }
@@ -147,9 +150,9 @@ class Verifier:
         # that are not acceptable
         return {
             "status": "stop",
-            "evidence": (f"Repair not verified. "
-                         f"Original tests still failing: {len(original_tests_now_passing > 0)},
-                         New failures: {len(new_failures)}"),
+            "evidence": "Repair not verified. Original tests still failing: {0}, New failures: {1}".format(
+                len(original_tests_now_passing > 0), len(new_failures)
+            ),
             "new_failures": list(new_failures) if new_failures else [],
             "previously_failing_now_passing": list(previously_failing_now_passing),
         }

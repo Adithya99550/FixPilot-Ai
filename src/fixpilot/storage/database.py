@@ -364,3 +364,52 @@ class Database:
         if self._conn:
             self._conn.close()
             self._conn = None
+
+
+class Storage:
+    """High-level storage operations for FixPilot."""
+
+    def __init__(self, db_path: str = "artifacts/fixpilot.sqlite3"):
+        self.db = Database(db_path)
+
+    def start_run(self, run_id: str, config: Dict[str, Any]) -> str:
+        return self.db.create_run(run_id, config)
+
+    def complete_run(
+        self,
+        run_id: str,
+        status: str,
+        exit_code: int = None,
+        error_summary: str = None,
+    ):
+        self.db.update_run_status(
+            run_id, status, exit_code, error_summary
+        )
+
+    def record_attempt(
+        self,
+        attempt_id: str,
+        run_id: str,
+        attempt_number: int,
+        patch: Any,
+        config: Dict[str, Any],
+    ) -> str:
+        return self.db.create_attempt(attempt_id, run_id, attempt_number, patch, config)
+
+    def update_attempt(
+        self, attempt_id: str, test_status: str = None,
+        verification_status: str = None
+    ):
+        self.db.update_attempt_status(attempt_id, test_status, verification_status)
+
+    def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        return self.db.get_run(run_id)
+
+    def get_run_attempts(self, run_id: str) -> List[Dict[str, Any]]:
+        return self.db.get_run_attempts(run_id)
+
+    def list_runs(self, limit: int = 50, status: str = None) -> List[Dict[str, Any]]:
+        return self.db.list_runs(limit, status)
+
+    def export_report(self, run_id: str) -> Optional[str]:
+        return self.db.export_report(run_id)

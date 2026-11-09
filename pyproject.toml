@@ -8,10 +8,23 @@ version = "0.1.0"
 description = "FixPilot AI: Autonomous Software Debugging and Self-Healing Agent"
 requires-python = ">=3.12"
 license = {text = "MIT"}
-dependencies = []
+dependencies = [
+    "pydantic>=2.5",
+    "python-dotenv>=1.0",
+]
 
 [project.scripts]
 fixpilot = "fixpilot.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-mock>=3.0",
+    "pytest-cov>=4.0",
+    "streamlit",
+    "plotly",
+    "pandas",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
