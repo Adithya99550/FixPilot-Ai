@@ -14,6 +14,7 @@ Responsibilities:
 import subprocess
 import json
 import os
+import time
 import tempfile
 from pathlib import Path
 from fixpilot.schemas.execution import ExecutionResult
@@ -89,74 +90,56 @@ class DockerExecutor:
             "--memory", self.memory_limit,
             "--cpus", str(self.cpus),
             "--pids-limit", str(self.pids_limit),
-            "--timeout", str(self.timeout_seconds),
             "--user", "nonroot:nonroot",
         ]
 
-        # Mount the workspace as read-only, with a writable temp dir
+        # Mount the workspace
         docker_cmd.extend([
             "-v", f"{workspace_path.resolve()}:/project:ro",
+            "-w", "/project",
         ])
 
-        if workdir:
-            # Create a writable working copy
-            workdir_path = workspace_path / workdir
-            if workdir_path.exists():
-                # Copy workspace to a temp writable location
-                import shutil
-                tmp_workdir = tempfile.mkdtemp(prefix="fixpilot_workspace_")
-                shutil.copytree(workspace_path, tmp_workdir)
-                docker_cmd.extend([
-                    "-v", f"{tmp_workdir}:/workdir:rw",
-                ])
-                exec_workdir = "/workdir"
-            else:
-                exec_workdir = "/project"
-        else:
-            exec_workdir = "/project"
-
         # Add the sandbox image
-        docker_cmd.extend([self.sandbox_image])
+        docker_cmd.append(self.sandbox_image)
 
         # Add the test command
         cmd = test_command if test_command else ["python", "-m", "pytest", "-q"]
+        full_cmd = docker_cmd + list(cmd)
 
-        # Construct the full command to run inside the container
-        # Use shell=False and argument array for safety
-        container_cmd = ["bash", "-c", " "]  # placeholder
-
-        full_cmd = docker_cmd + [" ".join(cmd)]  # simplified for now
-
+        start_time = time.time()
         try:
             result = subprocess.run(
                 full_cmd,
                 capture_output=True,
                 timeout=self.timeout_seconds,
             )
+            duration = time.time() - start_time
             return ExecutionResult(
                 exit_code=result.returncode,
                 stdout=self._truncate_output(result.stdout.decode("utf-8", errors="replace")),
                 stderr=self._truncate_output(result.stderr.decode("utf-8", errors="replace")),
                 timed_out=False,
-                duration=self.timeout_seconds,
+                duration=round(duration, 3),
                 sandbox_id="",
             )
         except subprocess.TimeoutExpired:
+            duration = time.time() - start_time
             return ExecutionResult(
                 exit_code=-1,
                 stdout="",
-                stderr="Execution timed out after {self.timeout_seconds}s",
+                stderr=f"Execution timed out after {self.timeout_seconds}s",
                 timed_out=True,
-                duration=self.timeout_seconds,
+                duration=round(duration, 3),
                 sandbox_id="",
             )
         except Exception as e:
+            duration = time.time() - start_time
             return ExecutionResult(
                 exit_code=-1,
                 stdout="",
                 stderr=str(e),
                 timed_out=False,
-                duration=0,
+                duration=round(duration, 3),
                 sandbox_id="",
             )
 

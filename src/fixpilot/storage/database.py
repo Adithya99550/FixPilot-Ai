@@ -12,6 +12,7 @@ Following §11 and §12 of PROJECT_SPEC.md.
 import sqlite3
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -114,7 +115,7 @@ class Database:
         Returns:
             The run_id that was created.
         """
-        now = os.popen("date -u +%Y-%m-%dT%H:%M:%SZ").read().strip()
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
             self._conn.execute(
                 """
@@ -151,7 +152,7 @@ class Database:
             exit_code: Final exit code.
             error_summary: Summary of any error.
         """
-        now = os.popen("date -u +%Y-%m-%dT%H:%M:%SZ").read().strip() or finished_at
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") or finished_at
         self._conn.execute(
             """
             UPDATE runs
@@ -182,7 +183,7 @@ class Database:
         Returns:
             The attempt_id that was created.
         """
-        now = os.popen("date -u +%Y-%m-%dT%H:%M:%SZ").read().strip()
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         patch_summary = patch.patch_summary if patch else ""
         patch_path = patch.patch if patch else ""
 

@@ -3,10 +3,10 @@
 ## Milestone 0 — Repository and specification
 
 - [x] Inspect repository ✓
-- [ ] Confirm Python/package manager/CLI choice
-- [ ] Create or validate folder structure
-- [ ] Add README, .gitignore, .env.example, dependency manifest
-- [ ] Add project version and license placeholder if needed
+- [x] Confirm Python/package manager/CLI choice
+- [x] Create or validate folder structure
+- [x] Add README, .gitignore, .env.example, dependency manifest
+- [x] Add project version and license placeholder if needed
 
 **Acceptance:**
 - Fresh setup instructions are complete
@@ -17,11 +17,11 @@
 
 ## Milestone 1 — Scanner and CLI foundation
 
-- [ ] Implement CLI skeleton
-- [ ] Implement safe project path validation
-- [ ] Implement project scanner and exclusions
-- [ ] Implement `doctor` and `scan`
-- [ ] Add unit tests
+- [x] Implement CLI skeleton
+- [x] Implement safe project path validation
+- [x] Implement project scanner and exclusions
+- [x] Implement `doctor` and `scan`
+- [x] Add unit tests
 
 **Acceptance:**
 - Scanner does not execute target code
@@ -34,10 +34,10 @@
 ## Milestone 2 — Sandbox and baseline test runner
 
 - [ ] Build/pin approved Docker image
-- [ ] Implement Docker executor with network disabled and resource/time limits
-- [ ] Implement safe pytest command
-- [ ] Capture structured execution output
-- [ ] Add test fixtures and integration tests
+- [x] Implement Docker executor with network disabled and resource/time limits
+- [x] Implement safe pytest command
+- [x] Capture structured execution output
+- [x] Add test fixtures and integration tests
 
 **Acceptance:**
 - Target code never runs on host
@@ -49,10 +49,10 @@
 
 ## Milestone 3 — Diagnostic collection
 
-- [ ] Parse pytest output and tracebacks
-- [ ] Extract failing test, exception, frames, source snippets
-- [ ] Redact sensitive data
-- [ ] Store diagnostic artifact
+- [x] Parse pytest output and tracebacks
+- [x] Extract failing test, exception, frames, source snippets
+- [x] Redact sensitive data
+- [x] Store diagnostic artifact
 
 **Acceptance:**
 - Correctly parse fixture cases
@@ -63,11 +63,11 @@
 
 ## Milestone 4 — LLM provider and Investigator
 
-- [ ] Add provider abstraction
-- [ ] Integrate Gemini behind configurable model
-- [ ] Create investigator prompt and structured schema
-- [ ] Validate responses and handle provider errors
-- [ ] Mock provider in tests
+- [x] Add provider abstraction
+- [x] Integrate Gemini behind configurable model
+- [x] Create investigator prompt and structured schema
+- [x] Validate responses and handle provider errors
+- [x] Mock provider in tests
 
 **Acceptance:**
 - Investigation returns structured hypotheses and evidence
@@ -79,11 +79,11 @@
 
 ## Milestone 5 — Planner and Repairer
 
-- [ ] Create repair-plan schema
-- [ ] Create patch-generation prompt
-- [ ] Generate unified diff
-- [ ] Validate patch paths, limits, and protected files
-- [ ] Add patch preview
+- [x] Create repair-plan schema
+- [x] Create patch-generation prompt
+- [x] Generate unified diff
+- [x] Validate patch paths, limits, and protected files
+- [x] Add patch preview
 
 **Acceptance:**
 - No direct model writes to target files
@@ -95,11 +95,11 @@
 
 ## Milestone 6 — Approval, apply, retry, verification
 
-- [ ] Implement approval gate
-- [ ] Apply patches to disposable workspace
-- [ ] Rerun baseline test command
-- [ ] Compare results and classify success/regression
-- [ ] Implement bounded retry and rollback
+- [x] Implement approval gate
+- [x] Apply patches to disposable workspace
+- [x] Rerun baseline test command
+- [x] Compare results and classify success/regression
+- [x] Implement bounded retry and rollback
 
 **Acceptance:**
 - Original project remains unchanged
@@ -112,10 +112,10 @@
 
 ## Milestone 7 — Persistence and reports
 
-- [ ] Implement SQLite schema/migrations
-- [ ] Store runs and attempts
-- [ ] Generate Markdown reports
-- [ ] Add history/show/export commands
+- [x] Implement SQLite schema/migrations
+- [x] Store runs and attempts
+- [x] Generate Markdown reports
+- [x] Add history/show/export commands
 
 **Acceptance:**
 - Completed runs remain available after restart

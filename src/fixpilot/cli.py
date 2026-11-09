@@ -7,6 +7,8 @@ from pathlib import Path
 from fixpilot.config import get_config
 from fixpilot.scanner.project_scanner import scan_project
 from fixpilot.sandbox.docker_executor import DockerExecutor, DockerUnavailableError
+from fixpilot.storage.database import Storage
+from fixpilot.workflow.engine import WorkflowEngine
 
 # Version string (avoid circular import with fixpilot.__init__)
 __version__ = "0.1.0"
@@ -41,6 +43,12 @@ def main():
         "--analysis-only",
         action="store_true",
         help="Run in analysis-only mode, no patch application",
+    )
+    parser_run.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Auto-approve patches without interactive prompt",
     )
     parser_run.set_defaults(func=cmd_run)
 
@@ -101,20 +109,65 @@ def cmd_scan(args, config):
 
 def cmd_history(args, config):
     """List run history."""
-    print("Run history")
-    # TODO: Implement history display
+    storage = Storage(config.get("FIXPILOT_DB_PATH", "artifacts/fixpilot.sqlite3"))
+    runs = storage.db.list_runs(limit=25)
+    print("\nFixPilot Run History")
+    print("=" * 70)
+    if not runs:
+        print("No recorded runs found.")
+        return
+
+    print(f"{'Run ID':<20} {'Status':<12} {'Started':<22} {'Mode'}")
+    print("-" * 70)
+    for r in runs:
+        run_id = r.get("run_id", "N/A")
+        status = str(r.get("status", "N/A")).upper()
+        started = str(r.get("started_at", "N/A"))[:19]
+        mode = r.get("mode", "N/A")
+        print(f"{run_id:<20} {status:<12} {started:<22} {mode}")
+    print("=" * 70)
 
 
 def cmd_show(args, config):
     """Show run details."""
-    print(f"Showing run: {args.run_id}")
-    # TODO: Implement show detail
+    storage = Storage(config.get("FIXPILOT_DB_PATH", "artifacts/fixpilot.sqlite3"))
+    run = storage.db.get_run(args.run_id)
+    if not run:
+        print(f"Error: Run '{args.run_id}' not found.")
+        return
+
+    print(f"\nRun Details: {args.run_id}")
+    print("=" * 60)
+    for k, v in run.items():
+        print(f"{k:<24}: {v}")
+
+    attempts = storage.db.get_run_attempts(args.run_id)
+    print("\nAttempts:")
+    print("-" * 60)
+    if not attempts:
+        print("No attempts recorded.")
+    else:
+        for att in attempts:
+            num = att.get("attempt_number", 1)
+            ver = att.get("verification_status", "N/A")
+            test_st = att.get("test_status", "N/A")
+            summary = att.get("patch_summary", "N/A")
+            print(f"  Attempt {num}: Verification={ver}, Test={test_st}, Patch={summary}")
+    print("=" * 60)
 
 
 def cmd_export(args, config):
     """Export run report."""
-    print(f"Exporting run: {args.run_id} as {args.format}")
-    # TODO: Implement export
+    storage = Storage(config.get("FIXPILOT_DB_PATH", "artifacts/fixpilot.sqlite3"))
+    report = storage.export_report(args.run_id)
+    if not report:
+        print(f"Error: Run '{args.run_id}' not found or could not generate report.")
+        return
+
+    out_file = Path(f"fixpilot_report_{args.run_id}.md")
+    out_file.write_text(report, encoding="utf-8")
+    print(f"Report exported successfully to {out_file.resolve()}")
+    print("\n" + report)
 
 
 def cmd_run(args, config):
@@ -125,80 +178,21 @@ def cmd_run(args, config):
         print(f"Error: '{args.path}' is not a valid directory.")
         return
 
-    if args.analysis_only:
-        print(f"Analysis-only mode for: {args.path}")
-        # TODO: Implement analysis-only workflow
-        return
+    print("=" * 60)
+    print(f"FixPilot AI: Initializing workflow on {project_path.resolve()}")
+    print("=" * 60)
 
-    # Initialize Docker executor
-    executor = DockerExecutor(config)
-
-    # Check if Docker is available - if not, BLOCKED per spec
     try:
-        if not executor._check_docker_available():
-            print("=" * 60)
-            print("BLOCKED: Docker sandbox unavailable")
-            print("=" * 60)
-            print(
-                "FixPilot requires Docker for sandboxed execution of target code."
-            )
-            print(
-                "Without Docker, target projects cannot be run in isolation,"
-            )
-            print(
-                "and repairs cannot be verified safely. Please install Docker "
-                "or configure a suitable sandbox environment."
-            )
-            print(
-                "Refer to the documentation for Docker setup instructions."
-            )
-            return
+        engine = WorkflowEngine(config=config)
+        result = engine.execute(
+            project_path=project_path,
+            analysis_only=args.analysis_only,
+            auto_approve=getattr(args, "yes", False),
+        )
     except DockerUnavailableError as e:
         print("=" * 60)
         print("BLOCKED: Docker sandbox unavailable")
         print("=" * 60)
         print(str(e))
-        return
-
-    print(f"Running FixPilot on: {args.path}")
-    print("=" * 60)
-    print("Initializing repair workflow...")
-    print("=" * 60)
-
-    # Step 1: Scan project
-    print("\n[1/5] Scanning project...")
-    scan_result = scan_project(project_path, config)
-    print(scan_result)
-
-    # Step 2: Run baseline tests
-    print("\n[2/5] Running baseline tests...")
-    test_command = config.get("test_command", ["python", "-m", "pytest", "-q"])
-    try:
-        exec_result = executor.run_tests(
-            test_command=test_command,
-            workspace_path=project_path,
-        )
-        print(f"Baseline exit code: {exec_result.exit_code}")
-        print(f"Duration: {exec_result.duration:.2f}s")
-        if exec_result.timed_out:
-            print("WARNING: Baseline tests timed out.")
-        elif exec_result.exit_code != 0:
-            print(f"Baseline tests failed (exit code: {exec_result.exit_code})")
-            print("Stderr preview:")
-            print(exec_result.stderr[:500] if exec_result.stderr else "(no stderr)")
-        else:
-            print("Baseline tests passed - no failing tests detected.")
-    except DockerUnavailableError:
-        print("BLOCKED: Docker unavailable for test execution.")
-        return
     except Exception as e:
-        print(f"Error running baseline tests: {e}")
-        return
-
-    # TODO: Continue workflow - investigator, planner, repairer, approval, etc.
-    print("\n[3/5] Investigation phase - TODO")
-    print("[4/5] Planning phase - TODO")
-    print("[5/5] Repair phase - TODO")
-
-    print("\nWorkflow incomplete - core stages not yet implemented.")
-    print("Use --analysis-only for investigation without patch application.")
+        print(f"Workflow error: {e}")

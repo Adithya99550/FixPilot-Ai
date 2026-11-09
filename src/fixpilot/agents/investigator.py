@@ -70,16 +70,22 @@ class Investigator:
             config,
         )
 
-        # Get LLM response
-        try:
-            raw_response = self.llm_provider.generate(prompt)
-            structured = self._parse_investigation_response(raw_response)
-        except LLMProviderError as e:
-            logger.warning(f"LLM provider error during investigation: {e}")
-            # Return a basic investigation without LLM hypotheses
+        # Get LLM response if provider available
+        if not self.llm_provider:
+            logger.info("No LLM provider configured; using heuristic fallback investigation.")
             structured = self._fallback_investigation(
                 parsed_failures, traceback_evidence, test_id
             )
+        else:
+            try:
+                raw_response = self.llm_provider.generate(prompt)
+                structured = self._parse_investigation_response(raw_response)
+            except Exception as e:
+                logger.warning(f"LLM provider error during investigation: {e}")
+                # Return a basic investigation without LLM hypotheses
+                structured = self._fallback_investigation(
+                    parsed_failures, traceback_evidence, test_id
+                )
 
         # Construct and return the InvestigationResult
         return self._build_investigation_result(structured, test_id, traceback_evidence)

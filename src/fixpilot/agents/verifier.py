@@ -148,11 +148,10 @@ class Verifier:
 
         # If we get here, the original tests still fail and/or there are new failures
         # that are not acceptable
+        remaining_failing_count = len(baseline_test_names - previously_failing_now_passing)
         return {
             "status": "stop",
-            "evidence": "Repair not verified. Original tests still failing: {0}, New failures: {1}".format(
-                len(original_tests_now_passing > 0), len(new_failures)
-            ),
+            "evidence": f"Repair not verified. Original tests still failing: {remaining_failing_count}, New failures: {len(new_failures)}",
             "new_failures": list(new_failures) if new_failures else [],
             "previously_failing_now_passing": list(previously_failing_now_passing),
         }
