@@ -1,0 +1,1 @@
+"""No-failure sample project for FixPilot AI."""

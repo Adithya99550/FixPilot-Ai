@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fixpilot"
+version = "0.1.0"
+description = "FixPilot AI: Autonomous Software Debugging and Self-Healing Agent"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+dependencies = []
+
+[project.scripts]
+fixpilot = "fixpilot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

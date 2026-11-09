@@ -1,0 +1,1 @@
+"""Type error sample project for FixPilot AI."""

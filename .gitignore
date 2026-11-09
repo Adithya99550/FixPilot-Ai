@@ -1,0 +1,45 @@
+# .gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.build/
+develop-eggs/
+dist/
+*.egg
+*.whl
+.sage/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.direnv/
+.tox/
+
+# Environment variables
+.env
+
+# Artifacts
+artifacts/
+*.sqlite3
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Docker
+Dockerfile.sandbox
+
+# FixPilot specific
+.fixpilot/
