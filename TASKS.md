@@ -126,8 +126,8 @@
 
 ## Milestone 8 — Dashboard
 
-- [ ] Implement Streamlit UI using existing service/workflow APIs
-- [ ] Add run monitor, diagnostics, patch review, verification, history
+- [x] Implement Streamlit UI using existing service/workflow APIs
+- [x] Add run monitor, diagnostics, patch review, verification, history
 
 **Acceptance:**
 - UI does not duplicate core logic
@@ -139,12 +139,12 @@
 
 ## Milestone 9 — Evaluation and final project package
 
-- [ ] Run seeded benchmark
-- [ ] Calculate metrics
-- [ ] Fix high-priority bugs
-- [ ] Update README and architecture docs
-- [ ] Prepare screenshots/demo script
-- [ ] Prepare final project report and limitations
+- [x] Run seeded benchmark
+- [x] Calculate metrics
+- [x] Fix high-priority bugs
+- [x] Update README and architecture docs
+- [x] Prepare screenshots/demo script
+- [x] Prepare final project report and limitations
 
 **Acceptance:**
 - Demo is repeatable from a clean setup

@@ -43,7 +43,7 @@ class Database:
     def _connect(self):
         """Establish a connection to the SQLite database."""
         try:
-            self._conn = sqlite3.connect(self.db_path)
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._create_tables()
@@ -396,6 +396,8 @@ class Storage:
         config: Dict[str, Any],
     ) -> str:
         return self.db.create_attempt(attempt_id, run_id, attempt_number, patch, config)
+
+    create_attempt = record_attempt
 
     def update_attempt(
         self, attempt_id: str, test_status: str = None,

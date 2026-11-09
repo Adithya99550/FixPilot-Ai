@@ -174,83 +174,100 @@ class PatchApplier:
                 # Continue even if backup fails
                 backup_path = None
 
-        # Parse and apply the patch
+        # Parse and apply the patch using unified diff hunks
         try:
-            # Simple patch application using a basic approach
-            # In a production system, would use patch/difflib properly
-            lines = patch.split("\n")
-
-            # Find files to modify
-            current_file = None
-            file_changes = {}
-
-            for i, line in enumerate(lines):
-                # Find --- /a/ or --- headers
-                if line.startswith("--- ") or line.startswith("--- "):
-                    # Extract file path
-                    file_path = line[4:].strip()  # Remove "--- "
-                    # Convert to relative path (remove a/ prefix if present)
-                    if file_path.startswith("a/"):
-                        file_path = file_path[2:]
-                    current_file = file_path
-                    file_changes[current_file] = {"added": [], "removed": [], "unchanged": []}
-                elif line.startswith("+++ "):
-                    # New file version path - skip, we use the --- path
-                    pass
-                elif line.startswith("@@ "):
-                    # Hunks section - skip first line, process hunks
-                    pass
-                elif current_file and line.startswith("+"):
-                    # Added line
-                    if current_file in file_changes:
-                        file_changes[current_file]["added"].append(line[1:])
-                elif current_file and line.startswith("-"):
-                    # Removed line
-                    if current_file in file_changes:
-                        file_changes[current_file]["removed"].append(line[1:])
-
-            # Apply changes to files
+            file_patches = self._parse_unified_diff(patch)
             applied_files = []
-            for file_path, changes in file_changes.items():
+
+            for file_path, hunks in file_patches.items():
                 full_path = (workspace_path / file_path) if not Path(file_path).is_absolute() else Path(file_path)
 
                 if not full_path.exists():
-                    # New file - create it
+                    # New file
                     try:
-                        # Create parent directories
                         full_path.parent.mkdir(parents=True, exist_ok=True)
-                        # Write the content based on added lines
-                        content = "\n".join(changes.get("added", []))
-                        if content:
-                            full_path.write_text(content, encoding="utf-8")
-                            applied_files.append(file_path)
-                    except Exception as e:
-                        return False, f"Failed to create new file {file_path}: {str(e)}", None
-                else:
-                    # Existing file - apply modifications
-                    try:
-                        existing_content = full_path.read_text(encoding="utf-8")
-                        added = changes.get("added", [])
-                        removed = changes.get("removed", [])
-
-                        # Remove lines
-                        for rem_line in removed:
-                            if rem_line in existing_content.split("\n"):
-                                existing_content = "\n".join(
-                                    l for l in existing_content.split("\n") if l != rem_line
-                                )
-
-                        # Add lines (append at end for simplicity)
-                        for add_line in added:
-                            existing_content += "\n" + add_line
-
-                        full_path.write_text(existing_content, encoding="utf-8")
+                        content = []
+                        for hunk in hunks:
+                            for tag, line in hunk:
+                                if tag == "+":
+                                    content.append(line)
+                        full_path.write_text("\n".join(content) + "\n", encoding="utf-8")
                         applied_files.append(file_path)
                     except Exception as e:
-                        return False, f"Failed to apply patch to {file_path}: {str(e)}", None
+                        return False, f"Failed to create new file {file_path}: {str(e)}", backup_path
+                else:
+                    # Existing file
+                    try:
+                        existing_content = full_path.read_text(encoding="utf-8")
+                        updated_content = self._apply_hunks_to_text(existing_content, hunks)
+                        full_path.write_text(updated_content, encoding="utf-8")
+                        applied_files.append(file_path)
+                    except Exception as e:
+                        return False, f"Failed to apply patch to {file_path}: {str(e)}", backup_path
 
             return True, f"Patch applied successfully to {len(applied_files)} file(s)", backup_path
 
         except Exception as e:
-            # Restore from backup if available
-            return False, f"Patch application failed: {str(e)}", None
+            return False, f"Patch application failed: {str(e)}", backup_path
+
+    def _parse_unified_diff(self, patch_text: str) -> Dict[str, List[List[Tuple[str, str]]]]:
+        """Parse unified diff text into per-file list of hunks."""
+        file_hunks: Dict[str, List[List[Tuple[str, str]]]] = {}
+        current_file = None
+        current_hunk: Optional[List[Tuple[str, str]]] = None
+
+        for line in patch_text.splitlines():
+            if line.startswith("--- "):
+                fpath = line[4:].strip()
+                if fpath.startswith("a/"):
+                    fpath = fpath[2:]
+                current_file = fpath
+                if current_file not in file_hunks:
+                    file_hunks[current_file] = []
+                current_hunk = None
+            elif line.startswith("+++ "):
+                continue
+            elif line.startswith("@@"):
+                if current_file:
+                    current_hunk = []
+                    file_hunks[current_file].append(current_hunk)
+            elif current_hunk is not None:
+                if line.startswith("-"):
+                    current_hunk.append(("-", line[1:]))
+                elif line.startswith("+"):
+                    current_hunk.append(("+", line[1:]))
+                elif line.startswith(" "):
+                    current_hunk.append((" ", line[1:]))
+                elif not line:
+                    current_hunk.append((" ", ""))
+
+        return file_hunks
+
+    def _apply_hunks_to_text(self, text: str, hunks: List[List[Tuple[str, str]]]) -> str:
+        """Apply a sequence of hunks to source text."""
+        result = text
+        for hunk in hunks:
+            old_lines = [l for tag, l in hunk if tag in (" ", "-")]
+            new_lines = [l for tag, l in hunk if tag in (" ", "+")]
+
+            old_block = "\n".join(old_lines)
+            new_block = "\n".join(new_lines)
+
+            if old_block in result:
+                result = result.replace(old_block, new_block, 1)
+            else:
+                # Fallback: line-level replacement if exact multi-line block has slight whitespace diffs
+                stripped_old = [l.strip() for tag, l in hunk if tag == "-"]
+                stripped_new = [l.strip() for tag, l in hunk if tag == "+"]
+                lines = result.splitlines()
+                new_file_lines = []
+                for line in lines:
+                    if line.strip() in stripped_old:
+                        idx = stripped_old.index(line.strip())
+                        indent = len(line) - len(line.lstrip())
+                        new_file_lines.append(" " * indent + stripped_new[idx] if idx < len(stripped_new) else "")
+                    else:
+                        new_file_lines.append(line)
+                result = "\n".join(new_file_lines)
+
+        return result

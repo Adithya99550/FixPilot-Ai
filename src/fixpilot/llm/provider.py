@@ -119,7 +119,7 @@ class GeminiProvider(BaseLLMProvider):
         try:
             import google.generativeai as genai
 
-            genai.configure(api_key=self._api_key)
+            genai.configure(api_key=self._api_key, transport="rest")
             self._genai = genai
         except ImportError:
             self._genai = None
