@@ -29,16 +29,18 @@ class StorageError(Exception):
 class Database:
     """SQLite database for FixPilot run history persistence."""
 
-    def __init__(self, db_path: str = "artifacts/fixpilot.sqlite3"):
+    def __init__(self, db_path: str = "artifacts/fixpilot.sqlite3", reports_dir: str = "reports"):
         self.db_path = db_path
+        self.reports_dir = Path(reports_dir)
         self._ensure_dirs()
         self._conn = None
         self._connect()
 
     def _ensure_dirs(self):
-        """Ensure the directory for the database file exists."""
+        """Ensure the directory for the database file and reports directory exist."""
         db_dir = Path(self.db_path).parent
         db_dir.mkdir(parents=True, exist_ok=True)
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
 
     def _connect(self):
         """Establish a connection to the SQLite database."""
@@ -360,6 +362,23 @@ class Database:
 
         return "\n".join(report_lines)
 
+    def save_report(self, run_id: str) -> Optional[Path]:
+        """Save a Markdown report for a run to the reports directory.
+
+        Args:
+            run_id: The run identifier.
+
+        Returns:
+            Path to the saved report file, or None if run not found.
+        """
+        report = self.export_report(run_id)
+        if report is None:
+            return None
+
+        report_path = self.reports_dir / f"fixpilot_report_{run_id}.md"
+        report_path.write_text(report, encoding="utf-8")
+        return report_path
+
     def close(self):
         """Close the database connection."""
         if self._conn:
@@ -370,8 +389,8 @@ class Database:
 class Storage:
     """High-level storage operations for FixPilot."""
 
-    def __init__(self, db_path: str = "artifacts/fixpilot.sqlite3"):
-        self.db = Database(db_path)
+    def __init__(self, db_path: str = "artifacts/fixpilot.sqlite3", reports_dir: str = "reports"):
+        self.db = Database(db_path, reports_dir)
 
     def start_run(self, run_id: str, config: Dict[str, Any]) -> str:
         return self.db.create_run(run_id, config)
@@ -416,3 +435,7 @@ class Storage:
 
     def export_report(self, run_id: str) -> Optional[str]:
         return self.db.export_report(run_id)
+
+    def save_report(self, run_id: str) -> Optional[Path]:
+        """Save a Markdown report for a run to the reports directory."""
+        return self.db.save_report(run_id)

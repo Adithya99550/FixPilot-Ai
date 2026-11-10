@@ -91,7 +91,10 @@ class WorkflowEngine:
         executor: Optional[Any] = None,
     ):
         self.config = config or get_config()
-        self.storage = storage or Storage(self.config.get("FIXPILOT_DB_PATH", "artifacts/fixpilot.sqlite3"))
+        self.storage = storage or Storage(
+            self.config.get("FIXPILOT_DB_PATH", "artifacts/fixpilot.sqlite3"),
+            reports_dir=self.config.get("FIXPILOT_REPORTS_DIR", "reports"),
+        )
         
         # LLM Provider setup
         if llm_provider:
@@ -165,11 +168,13 @@ class WorkflowEngine:
         if baseline_result.timed_out:
             print("ERROR: Baseline tests timed out.")
             self.storage.complete_run(run_id, "FAILED", baseline_result.exit_code, "Baseline timed out")
+            self.storage.save_report(run_id)
             return {"run_id": run_id, "status": "FAILED", "reason": "Baseline timed out"}
 
         if baseline_result.exit_code == 0:
             print("Baseline tests passed - no failing tests detected. Nothing to repair.")
             self.storage.complete_run(run_id, "SUCCESS", 0, "No failing tests")
+            self.storage.save_report(run_id)
             return {"run_id": run_id, "status": "SUCCESS", "message": "All tests pass"}
 
         print(f"Detected test failures (exit code: {baseline_result.exit_code})")
@@ -197,6 +202,7 @@ class WorkflowEngine:
         if analysis_only:
             print("\nAnalysis-only mode requested. Halting repair workflow.")
             self.storage.complete_run(run_id, "SUCCESS", baseline_result.exit_code, "Analysis completed")
+            self.storage.save_report(run_id)
             return {"run_id": run_id, "status": "SUCCESS", "investigation": investigation}
 
         # Planning
@@ -288,7 +294,11 @@ class WorkflowEngine:
 
         self.storage.complete_run(run_id, final_status, 0 if final_status == "SUCCESS" else 1)
         report = self.storage.export_report(run_id)
+        # Auto-save report to reports directory
+        report_path = self.storage.save_report(run_id)
+        if report_path:
+            print(f"Report saved to: {report_path.resolve()}")
         print("\n" + "=" * 60)
         print(f"FixPilot run {run_id} finished with status: {final_status}")
         print("=" * 60)
-        return {"run_id": run_id, "status": final_status, "report": report}
+        return {"run_id": run_id, "status": final_status, "report": report, "report_path": str(report_path) if report_path else None}

@@ -158,16 +158,17 @@ def cmd_show(args, config):
 
 def cmd_export(args, config):
     """Export run report."""
-    storage = Storage(config.get("FIXPILOT_DB_PATH", "artifacts/fixpilot.sqlite3"))
-    report = storage.export_report(args.run_id)
-    if not report:
+    storage = Storage(
+        config.get("FIXPILOT_DB_PATH", "artifacts/fixpilot.sqlite3"),
+        reports_dir=config.get("FIXPILOT_REPORTS_DIR", "reports"),
+    )
+    report_path = storage.save_report(args.run_id)
+    if not report_path:
         print(f"Error: Run '{args.run_id}' not found or could not generate report.")
         return
 
-    out_file = Path(f"fixpilot_report_{args.run_id}.md")
-    out_file.write_text(report, encoding="utf-8")
-    print(f"Report exported successfully to {out_file.resolve()}")
-    print("\n" + report)
+    print(f"Report exported successfully to {report_path.resolve()}")
+    print("\n" + report_path.read_text(encoding="utf-8"))
 
 
 def cmd_run(args, config):

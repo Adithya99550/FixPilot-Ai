@@ -23,5 +23,6 @@ def get_config():
         "FIXPILOT_TIMEOUT_SECONDS": int(os.getenv("FIXPILOT_TIMEOUT_SECONDS", "120")),
         "FIXPILOT_APPROVAL_REQUIRED": os.getenv("FIXPILOT_APPROVAL_REQUIRED", "true").lower() == "true",
         "FIXPILOT_ANALYSIS_ONLY": os.getenv("FIXPILOT_ANALYSIS_ONLY", "false").lower() == "true",
+        "FIXPILOT_REPORTS_DIR": os.getenv("FIXPILOT_REPORTS_DIR", "reports"),
         "PROJECT_ROOT": str(PROJECT_ROOT),
     }
