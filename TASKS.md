@@ -33,14 +33,14 @@
 
 ## Milestone 2 — Sandbox and baseline test runner
 
-- [ ] Build/pin approved Docker image
+- [ ] Build/pin approved Docker image (`fixpilot-sandbox:*` — Dockerfiles exist in `docs/`, images are not built in this environment)
 - [x] Implement Docker executor with network disabled and resource/time limits
 - [x] Implement safe pytest command
 - [x] Capture structured execution output
 - [x] Add test fixtures and integration tests
 
 **Acceptance:**
-- Target code never runs on host
+- Target code never runs on the host (unless `FIXPILOT_ALLOW_LOCAL_RUNNER=true` is explicitly set)
 - Sandbox failure is `BLOCKED`, not host fallback
 - Timeout and output limits work
 - Baseline test result is reproducible
@@ -53,6 +53,8 @@
 - [x] Extract failing test, exception, frames, source snippets
 - [x] Redact sensitive data
 - [x] Store diagnostic artifact
+- [x] Parse Jest (default + verbose reporter), `go test`, `cargo test` and JUnit output
+- [x] Register parsers for every language id in the registry (`python`, `javascript`, `typescript`, `go`, `rust`, `java-maven`, `java-gradle`)
 
 **Acceptance:**
 - Correctly parse fixture cases
@@ -68,6 +70,8 @@
 - [x] Create investigator prompt and structured schema
 - [x] Validate responses and handle provider errors
 - [x] Mock provider in tests
+- [x] Include the raw runner output in the investigation prompt
+- [x] Consolidate the duplicate `GeminiProvider` implementations into one
 
 **Acceptance:**
 - Investigation returns structured hypotheses and evidence
@@ -84,6 +88,9 @@
 - [x] Generate unified diff
 - [x] Validate patch paths, limits, and protected files
 - [x] Add patch preview
+- [x] Validate that the generated diff contains a real change; retry once with a stricter prompt
+- [x] Return an empty patch (not a no-op diff) when no usable diff can be produced
+- [x] Enforce the plan's `files_not_to_change` in the patch validator
 
 **Acceptance:**
 - No direct model writes to target files
@@ -100,6 +107,8 @@
 - [x] Rerun baseline test command
 - [x] Compare results and classify success/regression
 - [x] Implement bounded retry and rollback
+- [x] Return a `retry` verdict on partial progress so the retry loop can actually run
+- [x] Record the approval decision in the attempts table
 
 **Acceptance:**
 - Original project remains unchanged
@@ -116,6 +125,8 @@
 - [x] Store runs and attempts
 - [x] Generate Markdown reports
 - [x] Add history/show/export commands
+- [x] Use a single report renderer so CLI, dashboard and engine agree
+- [x] Persist the run exit code, error summary, language and model
 
 **Acceptance:**
 - Completed runs remain available after restart
@@ -137,14 +148,23 @@
 
 ---
 
-## Milestone 9 — Evaluation and final project package
+## Milestone 9 — Static analysis and code review
 
-- [x] Run seeded benchmark
-- [x] Calculate metrics
-- [x] Fix high-priority bugs
+- [x] Implement `StaticAnalyzer` (LLM + heuristic) and the `audits` table
+- [x] Implement `CodeReviewer` (LLM + heuristic) and the `reviews` table
+- [x] Expose both via `fixpilot audit` and `fixpilot review`
+- [x] Export both agents and their schemas from the package `__init__` modules
+
+---
+
+## Milestone 10 — Evaluation and final project package
+
+- [x] Prepare demo script
 - [x] Update README and architecture docs
-- [x] Prepare screenshots/demo script
 - [x] Prepare final project report and limitations
+- [ ] **Run a seeded benchmark and publish the metrics** (see PROJECT_SPEC §15.2 / §16 — the ten seeded fixtures listed in the spec are not all present, and no benchmark artefact exists yet)
+- [ ] Add the remaining seeded fixtures: missing-return, incorrect-condition, regression, no-tests, timeout, unsafe-patch, prompt-injection
+- [ ] Add unit tests for the parsers, verifier, retry manager and language registry
 
 **Acceptance:**
 - Demo is repeatable from a clean setup

@@ -4,7 +4,8 @@ Defines the LanguageConfig dataclass for multi-language support.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from pathlib import Path
+from typing import Dict, List
 
 
 @dataclass
@@ -16,8 +17,8 @@ class LanguageConfig:
         extensions: File extensions for this language (e.g., ['.py'])
         test_patterns: Patterns to identify test files (e.g., ['test_*.py', '*_test.py'])
         config_files: Configuration files that indicate this language (e.g., ['pyproject.toml', 'package.json'])
-        default_test_command: Default test command to run
-        build_commands: List of build commands to run before tests
+        default_test_command: Default test command to run (argv list)
+        build_commands: Build command to run before tests (argv list)
         sandbox_image: Docker image for sandboxed execution
         test_frameworks: Supported test frameworks for this language
         language_specific_flags: Additional flags for the language
@@ -33,24 +34,44 @@ class LanguageConfig:
     test_frameworks: List[str] = field(default_factory=list)
     language_specific_flags: Dict[str, str] = field(default_factory=dict)
     needs_network: bool = False
-    sandbox_image: str = ""
-    test_frameworks: List[str] = field(default_factory=list)
-    language_specific_flags: Dict[str, str] = field(default_factory=dict)
 
     def get_test_command(self, test_framework: str = "", custom_command: str = "") -> List[str]:
         """Get the test command, preferring custom > framework > default."""
         if custom_command:
             return custom_command.split()
+
         if test_framework:
-            # Could map framework to specific command
-            return self.default_test_command
+            framework_command = self._framework_command(test_framework)
+            if framework_command:
+                return framework_command
+
         return self.default_test_command
+
+    def _framework_command(self, test_framework: str) -> List[str]:
+        """Return the test command for a specific framework, if any."""
+        mapping = {
+            "pytest": ["python", "-m", "pytest", "-q"],
+            "unittest": ["python", "-m", "unittest", "discover"],
+            "jest": ["npm", "test", "--", "--passWithNoTests"],
+            "vitest": ["npm", "test", "--", "--passWithNoTests"],
+            "mocha": ["npm", "test"],
+            "ava": ["npm", "test"],
+            "go test": ["go", "test", "./..."],
+            "cargo test": ["cargo", "test"],
+            "junit": ["mvn", "test"],
+            "junit4": ["mvn", "test"],
+            "junit5": ["mvn", "test"],
+            "testng": ["mvn", "test"],
+            "maven": ["mvn", "test"],
+            "gradle": ["./gradlew", "test"],
+        }
+        return list(mapping.get(test_framework, []))
 
     def get_build_command(self, custom_command: str = "") -> List[str]:
         """Get the build command, preferring custom > default."""
         if custom_command:
             return custom_command.split()
-        return self.build_commands
+        return list(self.build_commands)
 
     def is_test_file(self, file_path: str) -> bool:
         """Check if a file path matches test patterns."""
@@ -65,6 +86,3 @@ class LanguageConfig:
         """Check if a file path is a config file for this language."""
         filename = Path(file_path).name
         return filename in self.config_files
-
-
-from pathlib import Path

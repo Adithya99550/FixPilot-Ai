@@ -11,14 +11,10 @@ Following §11 and §12 of PROJECT_SPEC.md.
 
 import sqlite3
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from fixpilot.schemas.state import FixPilotState
-from fixpilot.schemas.repair_plan import RepairPlan
-from fixpilot.schemas.patch import PatchResult
 
 
 class StorageError(Exception):
@@ -38,9 +34,14 @@ class Database:
 
     def _ensure_dirs(self):
         """Ensure the directory for the database file and reports directory exist."""
-        db_dir = Path(self.db_path).parent
-        db_dir.mkdir(parents=True, exist_ok=True)
-        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            db_dir = Path(self.db_path).parent
+            db_dir.mkdir(parents=True, exist_ok=True)
+            self.reports_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise StorageError(
+                f"Failed to create the storage directories for {self.db_path}: {exc}"
+            ) from exc
 
     def _connect(self):
         """Establish a connection to the SQLite database."""
@@ -112,6 +113,27 @@ class Database:
                 metadata_json TEXT
             )
         """)
+
+        # Migration: store the applied diff separately from the patch path.
+        attempt_columns = [
+            row[1] for row in cursor.execute("PRAGMA table_info(attempts)").fetchall()
+        ]
+        if "patch_diff" not in attempt_columns:
+            cursor.execute("ALTER TABLE attempts ADD COLUMN patch_diff TEXT")
+
+        # Migration: persist the final test outcome of a run so reports and
+        # the dashboard can show what actually happened.
+        run_columns = [
+            row[1] for row in cursor.execute("PRAGMA table_info(runs)").fetchall()
+        ]
+        for column, ddl in (
+            ("final_test_status", "TEXT"),
+            ("final_test_exit_code", "INTEGER"),
+            ("final_test_output", "TEXT"),
+            ("attempt_count", "INTEGER"),
+        ):
+            if column not in run_columns:
+                cursor.execute(f"ALTER TABLE runs ADD COLUMN {column} {ddl}")
 
         # Create audits table (static bug scan results)
         cursor.execute("""
@@ -197,15 +219,74 @@ class Database:
             error_summary: Summary of any error.
         """
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") or finished_at
-        self._conn.execute(
-            """
-            UPDATE runs
-            SET status = ?, finished_at = ?, final_exit_code = ?, error_summary = ?
-            WHERE run_id = ?
-            """,
-            (status, now, exit_code, error_summary, run_id),
-        )
-        self._conn.commit()
+        try:
+            self._conn.execute(
+                """
+                UPDATE runs
+                SET status = ?, finished_at = ?, final_exit_code = ?, error_summary = ?
+                WHERE run_id = ?
+                """,
+                (status, now, exit_code, error_summary, run_id),
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            raise StorageError(f"Failed to update run {run_id}: {exc}")
+
+    def update_run_results(
+        self,
+        run_id: str,
+        test_status: str = None,
+        test_exit_code: int = None,
+        test_output: str = None,
+        attempt_count: int = None,
+        baseline_exit_code: int = None,
+        retry_count: int = None,
+    ):
+        """Persist the final test outcome of a run.
+
+        Args:
+            run_id: The run identifier.
+            test_status: PASS / FAIL / TIMEOUT / ERROR / NOT_RUN.
+            test_exit_code: Exit code of the final test run.
+            test_output: (Truncated) output of the final test run.
+            attempt_count: Number of repair attempts that were made.
+            baseline_exit_code: Exit code of the baseline (pre-repair) run.
+            retry_count: Number of retries that were made (attempts - 1).
+        """
+        updates = []
+        params = []
+
+        if test_status is not None:
+            updates.append("final_test_status = ?")
+            params.append(test_status)
+        if test_exit_code is not None:
+            updates.append("final_test_exit_code = ?")
+            params.append(test_exit_code)
+        if test_output is not None:
+            updates.append("final_test_output = ?")
+            params.append(test_output)
+        if attempt_count is not None:
+            updates.append("attempt_count = ?")
+            params.append(attempt_count)
+        if baseline_exit_code is not None:
+            updates.append("baseline_exit_code = ?")
+            params.append(baseline_exit_code)
+        if retry_count is not None:
+            updates.append("retry_count = ?")
+            params.append(retry_count)
+
+        if not updates:
+            return
+
+        params.append(run_id)
+        try:
+            self._conn.execute(
+                f"UPDATE runs SET {', '.join(updates)} WHERE run_id = ?",
+                params,
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            raise StorageError(f"Failed to store run results for {run_id}: {exc}")
 
     def create_attempt(
         self,
@@ -229,16 +310,29 @@ class Database:
         """
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         patch_summary = patch.patch_summary if patch else ""
-        patch_path = patch.patch if patch else ""
+        patch_diff = patch.patch if patch else ""
+
+        # Persist the diff as a real artifact so ``patch_path`` points at a
+        # file on disk (PROJECT_SPEC §11.1) and the diff survives a restart.
+        patch_path = ""
+        if patch_diff:
+            try:
+                artifact_dir = self.reports_dir / "patches"
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                artifact = artifact_dir / f"{attempt_id}.patch"
+                artifact.write_text(patch_diff, encoding="utf-8")
+                patch_path = str(artifact)
+            except OSError:
+                patch_path = ""
 
         try:
             self._conn.execute(
                 """
                 INSERT INTO attempts (
                     attempt_id, run_id, attempt_number, root_cause_summary,
-                    patch_summary, patch_path, approval_status, test_status,
-                    verification_status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    patch_summary, patch_path, patch_diff, approval_status,
+                    test_status, verification_status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attempt_id,
@@ -247,6 +341,7 @@ class Database:
                     patch.root_cause_summary if patch else "",
                     patch_summary,
                     patch_path,
+                    patch_diff,
                     patch.approval_status if patch else "pending",
                     "pending",
                     "pending",
@@ -260,14 +355,15 @@ class Database:
 
     def update_attempt_status(
         self, attempt_id: str, test_status: str = None,
-        verification_status: str = None
+        verification_status: str = None, approval_status: str = None
     ):
-        """Update an attempt's test and verification status.
+        """Update an attempt's test, verification and approval status.
 
         Args:
             attempt_id: The attempt identifier.
             test_status: The test result status.
             verification_status: The verification result status.
+            approval_status: The approval decision (e.g. APPROVED / REJECTED).
         """
         updates = []
         params = []
@@ -278,6 +374,13 @@ class Database:
         if verification_status is not None:
             updates.append("verification_status = ?")
             params.append(verification_status)
+        if approval_status is not None:
+            updates.append("approval_status = ?")
+            params.append(approval_status)
+        if test_status is not None or verification_status is not None:
+            # The attempt reached the point where it was actually executed.
+            updates.append("applied_at = ?")
+            params.append(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
         if updates:
             params.append(attempt_id)
@@ -361,54 +464,32 @@ class Database:
 
         attempts = self.get_run_attempts(run_id)
 
-        # Generate Markdown report
-        report_lines = [
-            f"# FixPilot AI Repair Report",
-            f"**Run ID:** {run.get('run_id', 'N/A')}",
-            f"**Version:** 0.1.0",
-            "",
-            "## Run Metadata",
-            f"- **Target:** {run.get('target_display_path', 'N/A')}",
-            f"- **Status:** {run.get('status', 'N/A').upper()}",
-            f"- **Start:** {run.get('started_at', 'N/A')}",
-            f"- **Finish:** {run.get('finished_at', 'N/A')}",
-            f"- **Mode:** {run.get('mode', 'N/A')}",
-            f"- **Model:** {run.get('model_name', 'N/A')}",
-            f"- **Baseline Exit Code:** {run.get('baseline_exit_code', 'N/A')}",
-            f"- **Final Exit Code:** {run.get('final_exit_code', 'N/A')}",
-            f"- **Retry Count:** {run.get('retry_count', 'N/A')}",
-            "",
-            "## Attempt History",
-        ]
+        # Single source of truth for report rendering.
+        from fixpilot.reporting.markdown_report import generate_markdown_report
 
-        for attempt in attempts:
-            report_lines.append(
-                f"### Attempt {attempt.get('attempt_number', 'N/A')}"
-            )
-            report_lines.append(f"- **Status:** {attempt.get('verification_status', 'N/A').upper()}")
-            report_lines.append(f"- **Test Status:** {attempt.get('test_status', 'N/A')}")
-            report_lines.append(f"- **Approval:** {attempt.get('approval_status', 'N/A')}")
-            report_lines.append(f"- **Patch Summary:** {attempt.get('patch_summary', 'N/A')}")
-            report_lines.append(f"- **Created:** {attempt.get('created_at', 'N/A')}")
-            report_lines.append("")
+        return generate_markdown_report(run, attempts)
 
-        report_lines.extend([
-            "## Honest Limitations",
-            "- **It cannot fix what isn't tested.** No failing test → it reports \"nothing to repair.\"",
-            "- **Passing tests don't guarantee correctness** — the fix might be wrong even if tests pass.",
-            "- **LLM diagnosis can be wrong or incomplete.**",
-            "- **Non-Python languages need Docker** — the sandbox images (`fixpilot-sandbox:go`, `:node`, `:rust`, `:java`) are mandatory for Go/Rust/Java/JS because the host toolchain isn't available. On a Windows machine without Docker, only Python runs locally.",
-            "- **Human approval may be required** before a patch is applied (unless `--yes` / auto-approve is set).",
-            "",
-            "> **In short:** FixPilot is a **test-driven self-healing agent** — it fixes failing tests in Python, JavaScript, TypeScript, Go, Rust, and Java projects, but it needs (a) a failing test to work from and (b) Docker for anything other than Python on this machine.",
-            "",
-            "---\n*Report generated by FixPilot AI*"
-        ])
+    def save_report_text(self, run_id: str, report: str) -> Optional[Path]:
+        """Save a pre-rendered Markdown report for a run.
 
-        return "\n".join(report_lines)
+        Args:
+            run_id: The run identifier.
+            report: The already-rendered Markdown content.
+
+        Returns:
+            Path to the saved report file, or None if the run is unknown.
+        """
+        if self.get_run(run_id) is None:
+            return None
+        report_path = self.reports_dir / f"fixpilot_report_{run_id}.md"
+        report_path.write_text(report, encoding="utf-8")
+        return report_path
 
     def save_report(self, run_id: str) -> Optional[Path]:
         """Save a Markdown report for a run to the reports directory.
+
+        The path is also stored on the run row so the database can point at
+        the generated artifact (PROJECT_SPEC §12.1).
 
         Args:
             run_id: The run identifier.
@@ -422,13 +503,157 @@ class Database:
 
         report_path = self.reports_dir / f"fixpilot_report_{run_id}.md"
         report_path.write_text(report, encoding="utf-8")
+        self._set_report_path(run_id, str(report_path))
         return report_path
+
+    def _set_report_path(self, run_id: str, report_path: str) -> None:
+        """Store the generated report path on the run row."""
+        try:
+            self._conn.execute(
+                "UPDATE runs SET report_path = ? WHERE run_id = ?",
+                (report_path, run_id),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            pass
+
+    def log_event(
+        self,
+        run_id: str,
+        stage: str,
+        message: str = "",
+        level: str = "INFO",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Append an audit-log entry for a workflow stage.
+
+        The events table is the audit trail of the state machine described in
+        PROJECT_SPEC §6.1.
+
+        Args:
+            run_id: The run identifier.
+            stage: The workflow stage (e.g. "SCAN_PROJECT").
+            message: A human readable message.
+            level: Severity of the event.
+            metadata: Optional structured metadata (JSON encoded).
+        """
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO events (run_id, timestamp, stage, level, message, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    stage,
+                    level,
+                    message,
+                    json.dumps(metadata) if metadata else None,
+                ),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            pass
+
+    def set_run_toolchain(
+        self,
+        run_id: str,
+        language: str,
+        test_framework: str,
+        test_command: str = "",
+        build_command: str = "",
+    ) -> None:
+        """Record the detected toolchain on the run row.
+
+        The run row is created before the toolchain is detected, so the
+        detected values have to be written back afterwards.
+        """
+        try:
+            self._conn.execute(
+                """
+                UPDATE runs
+                SET language = ?, test_framework = ?, test_command = ?, build_command = ?
+                WHERE run_id = ?
+                """,
+                (language, test_framework, test_command, build_command, run_id),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            pass
 
     def close(self):
         """Close the database connection."""
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    def save_audit(self, audit: Any) -> Optional[str]:
+        """Persist a static analysis audit result.
+
+        Args:
+            audit: An AuditResult model.
+
+        Returns:
+            The stored audit id, or None if the audit is invalid.
+        """
+        if audit is None:
+            return None
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO audits (
+                    audit_id, target_path, timestamp, scanned_files_count,
+                    findings_json, summary
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    audit.audit_id,
+                    audit.target_path,
+                    audit.timestamp,
+                    audit.scanned_files_count,
+                    json.dumps([f.model_dump() for f in audit.findings]),
+                    audit.summary,
+                ),
+            )
+            self._conn.commit()
+            return audit.audit_id
+        except sqlite3.Error:
+            return None
+
+    def save_review(self, review: Any) -> Optional[str]:
+        """Persist a code quality review result.
+
+        Args:
+            review: A ReviewResult model.
+
+        Returns:
+            The stored review id, or None if the review is invalid.
+        """
+        if review is None:
+            return None
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO reviews (
+                    review_id, target_path, timestamp, scanned_files_count,
+                    issues_json, metrics_json, summary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review.review_id,
+                    review.target_path,
+                    review.timestamp,
+                    review.scanned_files_count,
+                    json.dumps([i.model_dump() for i in review.issues]),
+                    json.dumps(review.metrics),
+                    review.summary,
+                ),
+            )
+            self._conn.commit()
+            return review.review_id
+        except sqlite3.Error:
+            return None
 
 
 class Storage:
@@ -447,8 +672,35 @@ class Storage:
         exit_code: int = None,
         error_summary: str = None,
     ):
+        # NOTE: update_run_status signature is
+        # (run_id, status, finished_at, exit_code, error_summary).
+        # Pass by keyword so the exit code cannot land in finished_at.
         self.db.update_run_status(
-            run_id, status, exit_code, error_summary
+            run_id,
+            status,
+            exit_code=exit_code,
+            error_summary=error_summary,
+        )
+
+    def update_run_results(
+        self,
+        run_id: str,
+        test_status: str = None,
+        test_exit_code: int = None,
+        test_output: str = None,
+        attempt_count: int = None,
+        baseline_exit_code: int = None,
+        retry_count: int = None,
+    ):
+        """Persist the final test outcome of a run."""
+        self.db.update_run_results(
+            run_id,
+            test_status=test_status,
+            test_exit_code=test_exit_code,
+            test_output=test_output,
+            attempt_count=attempt_count,
+            baseline_exit_code=baseline_exit_code,
+            retry_count=retry_count,
         )
 
     def record_attempt(
@@ -465,9 +717,11 @@ class Storage:
 
     def update_attempt(
         self, attempt_id: str, test_status: str = None,
-        verification_status: str = None
+        verification_status: str = None, approval_status: str = None
     ):
-        self.db.update_attempt_status(attempt_id, test_status, verification_status)
+        self.db.update_attempt_status(
+            attempt_id, test_status, verification_status, approval_status
+        )
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         return self.db.get_run(run_id)
@@ -481,6 +735,46 @@ class Storage:
     def export_report(self, run_id: str) -> Optional[str]:
         return self.db.export_report(run_id)
 
+    def save_report_text(self, run_id: str, report: str) -> Optional[Path]:
+        """Save a pre-rendered Markdown report for a run."""
+        return self.db.save_report_text(run_id, report)
+
     def save_report(self, run_id: str) -> Optional[Path]:
         """Save a Markdown report for a run to the reports directory."""
         return self.db.save_report(run_id)
+
+    def save_audit(self, audit: Any) -> Optional[str]:
+        """Persist a static analysis audit result."""
+        return self.db.save_audit(audit)
+
+    def save_review(self, review: Any) -> Optional[str]:
+        """Persist a code quality review result."""
+        return self.db.save_review(review)
+
+    def log_event(
+        self,
+        run_id: str,
+        stage: str,
+        message: str = "",
+        level: str = "INFO",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Append an audit-log entry for a workflow stage."""
+        self.db.log_event(run_id, stage, message, level, metadata)
+
+    def set_run_toolchain(
+        self,
+        run_id: str,
+        language: str,
+        test_framework: str,
+        test_command: str = "",
+        build_command: str = "",
+    ) -> None:
+        """Record the detected toolchain on the run row.
+
+        The run row is created before the toolchain is detected, so the
+        detected values have to be written back afterwards.
+        """
+        self.db.set_run_toolchain(
+            run_id, language, test_framework, test_command, build_command
+        )

@@ -2,12 +2,10 @@
 
 import json
 from typing import Any, Dict
-from unittest.mock import MagicMock, patch
 
-import pytest
 
 from fixpilot.agents.investigator import Investigator
-from fixpilot.schemas.investigation import InvestigationResult, RootCauseHypothesis
+from fixpilot.schemas.investigation import InvestigationResult
 
 
 class MockLLMProvider:

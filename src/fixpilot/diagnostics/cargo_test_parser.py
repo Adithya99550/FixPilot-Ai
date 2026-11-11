@@ -43,6 +43,8 @@ class CargoTestParser(DiagnosticParser):
         current_file = ""
         current_line = 0
         in_failure = False
+        in_failures_section = False
+        listed_failures = []
 
         for line in lines:
             # Match "test test_name ... FAILED"
@@ -58,6 +60,7 @@ class CargoTestParser(DiagnosticParser):
                 current_file = ""
                 current_line = 0
                 in_failure = True
+                in_failures_section = False
                 continue
 
             # Match "test test_name ... ok"
@@ -69,9 +72,31 @@ class CargoTestParser(DiagnosticParser):
                 in_failure = False
                 continue
 
+            # The "failures:" section lists the names of the failed tests
+            # (one per line, indented). It is the fallback when the panic
+            # message was truncated.
+            if line.strip() == "failures:":
+                in_failures_section = True
+                continue
+            if in_failures_section:
+                stripped = line.strip()
+                if not stripped:
+                    in_failures_section = False
+                    continue
+                if stripped.startswith("test result:"):
+                    in_failures_section = False
+                    continue
+                if stripped not in listed_failures:
+                    listed_failures.append(stripped)
+                continue
+
             # Match panic location: "thread 'test_name' panicked at src/lib.rs:43:9:"
             # or "thread 'test_name' panicked at 'message', file.rs:10:5"
-            panic_match = re.search(r"panicked at\s+(?:'([^']+)',\s+)?(\S+):(\d+)(?::(\d+))?", line)
+            # The path group must be non-greedy/restricted so that the
+            # line number is not swallowed by the path.
+            panic_match = re.search(
+                r"panicked at\s+(?:'([^']+)',\s*)?([\w./\\-]+?):(\d+)(?::(\d+))?", line
+            )
             if panic_match and current_test:
                 msg = panic_match.group(1) or "panic"
                 current_file = panic_match.group(2)
@@ -96,6 +121,17 @@ class CargoTestParser(DiagnosticParser):
             failures.append(self._build_evidence(
                 current_test, current_error, current_file, current_line
             ))
+        elif current_test:
+            # The test failed but no panic message was captured.
+            failures.append(self._build_evidence(
+                current_test, "test failed", current_file, current_line
+            ))
+
+        # Tests that are only listed in the "failures:" section.
+        known = {failure.failing_test for failure in failures}
+        for name in listed_failures:
+            if name not in known:
+                failures.append(self._build_evidence(name, "test failed", "", 0))
 
         return failures
 

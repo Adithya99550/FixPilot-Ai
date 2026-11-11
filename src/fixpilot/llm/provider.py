@@ -9,9 +9,21 @@ Responsibilities:
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Optional
 
-from fixpilot.schemas.investigation import InvestigationResult, RootCauseHypothesis
+
+# The `google.generativeai` package is deprecated in favour of `google-genai`.
+# It still works, but importing it prints a multi-line warning on every CLI
+# invocation, which drowns out the actual command output.
+import warnings
+
+# NOTE: the warning message starts with newlines, so the pattern has to be
+# able to cross line boundaries (``.`` does not match "\n").
+warnings.filterwarnings(
+    "ignore",
+    message=r"[\s\S]*google\.generativeai[\s\S]*",
+    category=FutureWarning,
+)
 
 
 class LLMProviderError(Exception):
@@ -207,10 +219,12 @@ class GeminiProvider(BaseLLMProvider):
             # Validate against the schema - this is a simplified validation
             # In a full implementation, would use pydantic's model_validate
             if isinstance(parsed, dict):
-                return {
-                    k: v for k, v in parsed.items() 
-                    if k in output_schema.model_fields  # type: ignore[attr-defined]
-                }
+                model_fields = getattr(output_schema, "model_fields", None)
+                if model_fields is None:
+                    # No Pydantic schema was supplied (e.g. `dict`), so the
+                    # caller wants the raw parsed object.
+                    return parsed
+                return {k: v for k, v in parsed.items() if k in model_fields}
             return parsed
 
         except Exception as e:

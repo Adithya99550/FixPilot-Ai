@@ -1,7 +1,6 @@
 """Unit tests for FixPilot AI configuration."""
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from fixpilot.config import get_config
 

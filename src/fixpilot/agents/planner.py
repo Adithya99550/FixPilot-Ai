@@ -17,7 +17,6 @@ from typing import Any, Dict, List, Optional
 
 from fixpilot.schemas.repair_plan import RepairPlan
 from fixpilot.schemas.investigation import InvestigationResult, RootCauseHypothesis
-from fixpilot.languages import get_language_config
 
 logger = logging.getLogger("fixpilot.planner")
 
@@ -96,6 +95,8 @@ class Planner:
             "go": "go test ./...",
             "rust": "cargo test",
             "java": "mvn test",
+            "java-maven": "mvn test",
+            "java-gradle": "gradle test",
         }
         if test_framework:
             if test_framework == "jest":
@@ -108,8 +109,10 @@ class Planner:
                 return "go test ./..."
             elif test_framework == "cargo test":
                 return "cargo test"
-            elif test_framework in ("junit", "maven", "gradle"):
-                return "mvn test" if test_framework != "gradle" else "gradle test"
+            elif test_framework in ("junit", "junit5", "maven", "gradle"):
+                if test_framework == "gradle" or language == "java-gradle":
+                    return "gradle test"
+                return "mvn test"
         return defaults.get(language, "python -m pytest -q")
 
     def _identify_files_to_change(
@@ -225,7 +228,7 @@ class Planner:
         elif language == "rust":
             risks.append("May affect other tests using similar traits or macros")
             risks.append("Borrow checker changes may cascade to dependent code")
-        elif language == "java":
+        elif language in ("java", "java-maven", "java-gradle"):
             risks.append("May affect other tests using similar test utilities or mocks")
             risks.append("Refactoring may break binary compatibility")
         else:

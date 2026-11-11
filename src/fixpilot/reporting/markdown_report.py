@@ -4,7 +4,20 @@ Generates comprehensive markdown reports for repair runs according to PROJECT_SP
 """
 
 from typing import Any, Dict, List, Optional
-from fixpilot.schemas.state import FixPilotState
+
+
+def _or_na(value: Any, fallback: str = "N/A") -> str:
+    """Render a value for the report, turning SQL NULL into ``N/A``.
+
+    ``dict.get(key, default)`` only substitutes the default when the key is
+    *absent*; a column that exists but holds NULL would be rendered as the
+    literal string ``None``.
+    """
+    if value is None:
+        return fallback
+    if isinstance(value, str) and not value.strip():
+        return fallback
+    return value
 
 
 def generate_markdown_report(
@@ -17,19 +30,22 @@ def generate_markdown_report(
     status = str(run_data.get("status", "UNKNOWN")).upper()
 
     lines = [
-        f"# FixPilot AI Repair Report",
+        "# FixPilot AI Repair Report",
         f"**Run ID:** `{run_id}`  ",
         f"**Status:** **{status}**  ",
-        f"**Version:** 0.1.0",
+        "**Version:** 0.1.0",
         "",
         "## Summary",
-        f"- **Target Project:** `{run_data.get('target_display_path', 'N/A')}`",
-        f"- **Mode:** {run_data.get('mode', 'standard')}",
-        f"- **Model:** {run_data.get('model_name', 'default')}",
-        f"- **Started At:** {run_data.get('started_at', 'N/A')}",
-        f"- **Finished At:** {run_data.get('finished_at', 'N/A')}",
-        f"- **Baseline Exit Code:** {run_data.get('baseline_exit_code', 'N/A')}",
-        f"- **Final Exit Code:** {run_data.get('final_exit_code', 'N/A')}",
+        f"- **Target Project:** `{_or_na(run_data.get('target_display_path'))}`",
+        f"- **Mode:** {_or_na(run_data.get('mode'), 'standard')}",
+        f"- **Model:** {_or_na(run_data.get('model_name'), 'default')}",
+        f"- **Language:** {_or_na(run_data.get('language'))}",
+        f"- **Test Framework:** {_or_na(run_data.get('test_framework'))}",
+        f"- **Started At:** {_or_na(run_data.get('started_at'))}",
+        f"- **Finished At:** {_or_na(run_data.get('finished_at'))}",
+        f"- **Baseline Exit Code:** {_or_na(run_data.get('baseline_exit_code'))}",
+        f"- **Final Exit Code:** {_or_na(run_data.get('final_exit_code'))}",
+        f"- **Retry Count:** {_or_na(run_data.get('retry_count'))}",
         f"- **Total Attempts:** {len(attempts)}",
         "",
     ]
@@ -62,7 +78,7 @@ def generate_markdown_report(
                 "",
             ])
 
-            patch_content = attempt.get("patch_path") or attempt.get("patch")
+            patch_content = attempt.get("patch_diff") or attempt.get("patch_path")
             if patch_content:
                 lines.extend([
                     "**Applied Patch Diff:**",

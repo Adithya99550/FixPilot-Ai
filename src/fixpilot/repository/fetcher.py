@@ -11,7 +11,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -38,6 +37,7 @@ class GitHubFetcher:
         target: Optional[str] = None,
         branch: Optional[str] = None,
         commit: Optional[str] = None,
+        force: bool = False,
     ) -> Path:
         """Clone a GitHub repository.
 
@@ -46,6 +46,7 @@ class GitHubFetcher:
             target: Target directory name (default: repo name from URL)
             branch: Branch to checkout (default: default branch)
             commit: Commit SHA to checkout (takes precedence over branch)
+            force: Overwrite an existing target directory.
 
         Returns:
             Path to the cloned repository.
@@ -53,29 +54,51 @@ class GitHubFetcher:
         Raises:
             CloneError: If cloning fails.
         """
-        # Parse URL to get repo name and prepare authenticated URL
+        # Parse URL to get repo name
         repo_name = self._extract_repo_name(url)
         if not target:
             target = repo_name
 
-        # Prepare target directory
+        # Prepare target directory. Never silently delete an existing
+        # directory - that is data loss.
         target_path = Path.cwd() / target
         if target_path.exists():
-            # Remove existing directory
+            if not force:
+                raise CloneError(
+                    f"Target directory '{target_path}' already exists. "
+                    "Pass --force to overwrite it, or choose another target."
+                )
             shutil.rmtree(target_path)
 
-        # Prepare authenticated URL for HTTPS
-        clone_url = self._prepare_clone_url(url)
+        # Authenticate without writing the token into the clone's .git/config.
+        clone_url = url
+        auth_env = None
+        if self._needs_token(url):
+            auth_env = self._auth_env()
 
         # Clone the repository
-        try:
-            self._run_git(["clone", "--depth", "1", clone_url, str(target_path)], check=False)
-        except subprocess.CalledProcessError as e:
-            # Try without --depth for repos with submodules or large history
-            try:
-                self._run_git(["clone", clone_url, str(target_path)], check=True)
-            except subprocess.CalledProcessError as e2:
-                raise CloneError(f"Failed to clone repository: {e2}")
+        result = self._run_git(
+            ["clone", "--depth", "1", clone_url, str(target_path)],
+            check=False,
+            env=auth_env,
+        )
+        if result.returncode != 0:
+            # Retry without --depth for repos with submodules or large history.
+            if target_path.exists():
+                shutil.rmtree(target_path, ignore_errors=True)
+            result = self._run_git(
+                ["clone", clone_url, str(target_path)],
+                check=False,
+                env=auth_env,
+            )
+            if result.returncode != 0:
+                raise CloneError(
+                    f"Failed to clone repository: "
+                    f"{(result.stderr or result.stdout or 'unknown error').strip()}"
+                )
+
+        if not target_path.is_dir():
+            raise CloneError(f"Clone reported success but '{target_path}' does not exist.")
 
         # Checkout specific branch if requested
         if branch:
@@ -107,23 +130,52 @@ class GitHubFetcher:
                 return match.group(2)
         return "repo"
 
+    def _needs_token(self, url: str) -> bool:
+        """Return True when the URL is HTTPS and a token is available."""
+        return bool(self.github_token) and url.startswith("https://")
+
+    def _auth_env(self) -> dict:
+        """Build the environment used to authenticate the git request.
+
+        The token is passed through an ``Authorization`` header rather than
+        being embedded in the remote URL, so it is never written into the
+        clone's ``.git/config``.
+        """
+        env = os.environ.copy()
+        basic = _basic_auth_header(self.github_token)
+        if basic:
+            env["GIT_CONFIG_COUNT"] = "1"
+            env["GIT_CONFIG_KEY_0"] = "http.extraheader"
+            env["GIT_CONFIG_VALUE_0"] = basic
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        return env
+
     def _prepare_clone_url(self, url: str) -> str:
-        """Prepare authenticated clone URL for HTTPS."""
-        # If it's already SSH, return as-is (assumes SSH keys are set up)
-        if url.startswith("git@github.com:"):
-            return url
+        """Return the URL to clone from.
 
-        # If it's HTTPS and we have a token, inject it
-        if self.github_token and url.startswith("https://github.com/"):
-            # Format: https://<token>@github.com/owner/repo.git
-            return url.replace("https://github.com/", f"https://{self.github_token}@github.com/")
-
+        The token is never injected into the URL - that would persist it in
+        the clone's ``.git/config`` in plaintext.
+        """
         return url
 
-    def _run_git(self, args: list, check: bool = True) -> subprocess.CompletedProcess:
+    def _run_git(
+        self, args: list, check: bool = True, env: Optional[dict] = None
+    ) -> subprocess.CompletedProcess:
         """Run a git command."""
         cmd = ["git"] + args
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if check and result.returncode != 0:
-            raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, result.stdout, result.stderr
+            )
         return result
+
+
+def _basic_auth_header(token: str) -> str:
+    """Build a Basic Authorization header value from a GitHub token."""
+    import base64
+
+    if not token:
+        return ""
+    encoded = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    return f"Authorization: Basic {encoded}"

@@ -11,10 +11,9 @@ Following §6.5 and §6.4 of PROJECT_SPEC.md for verification criteria.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict
 
 from fixpilot.schemas.execution import ExecutionResult
-from fixpilot.schemas.state import FixPilotState
 from fixpilot.diagnostics import PARSER_REGISTRY
 
 logger = logging.getLogger("fixpilot.verifier")
@@ -97,14 +96,12 @@ class Verifier:
             }
 
         # Parse test results using appropriate parser
-        pre_failures = self._parse_failures(pre_patch_result.stdout, pre_patch_result.stderr, config)
         post_failures = self._parse_failures(post_patch_result.stdout, post_patch_result.stderr, config)
         baseline_failures = self._parse_failures(
             baseline_result.stdout, baseline_result.stderr, config
         )
 
         # Get sets of test names
-        pre_test_names = {f.failing_test for f in pre_failures if f.failing_test}
         post_test_names = {f.failing_test for f in post_failures if f.failing_test}
         baseline_test_names = {f.failing_test for f in baseline_failures if f.failing_test}
 
@@ -116,61 +113,100 @@ class Verifier:
         # New failures = tests failing in post_patch that weren't in baseline
         new_failures = post_test_names - baseline_test_names
 
-        # Also check for regression: tests that passed baseline but fail post-patch
-        # (these are tests that were passing before and now fail)
-        regression_tests = pre_test_names - baseline_test_names
+        # The strongest possible evidence: the whole suite passed after the
+        # repair. This is checked first because a parser may be unable to
+        # extract individual test names from the output.
+        if post_patch_result.exit_code == 0:
+            return {
+                "status": "success",
+                "evidence": (
+                    "All tests pass after the repair (exit code 0). "
+                    "Previously failing tests: {0}".format(
+                        len(previously_failing_now_passing)
+                        or len(baseline_test_names)
+                    )
+                ),
+                "new_failures": [],
+                "previously_failing_now_passing": list(previously_failing_now_passing),
+            }
 
         # Decision logic
         if new_failures:
             # Has new failures - check if they're acceptable
             # Check config for acceptable new failures
-            acceptable_new = config.get("acceptable_new_failures", [])
+            acceptable_new = set(config.get("acceptable_new_failures", []) or [])
 
             # If there are new failures not in the acceptable list, it's a regression
-            unacceptable_new = new_failures - set(acceptable_new) if acceptable_new else new_failures
+            unacceptable_new = new_failures - acceptable_new
 
             if unacceptable_new:
                 return {
                     "status": "regression",
                     "evidence": "New failures introduced: {0}. Regression detected - repair introduced new issues.".format(
-                        ', '.join(unacceptable_new)
+                        ', '.join(sorted(unacceptable_new))
                     ),
                     "new_failures": list(unacceptable_new),
                     "previously_failing_now_passing": list(previously_failing_now_passing),
                 }
 
-            # New failures are acceptable, check if original tests still fail
-            if not new_failures - set(acceptable_new) if acceptable_new else []:
-                # All failures are new, original tests now pass
+            # The new failures are acceptable. The repair is only successful
+            # when the originally failing tests now pass as well.
+            if previously_failing_now_passing or not baseline_test_names:
                 return {
                     "status": "success",
-                    "evidence": "Original tests now pass. New failures are acceptable.".format(
-                        ', '.join(new_failures)
+                    "evidence": (
+                        "Original tests now pass. New failures are acceptable: "
+                        "{0}".format(', '.join(sorted(new_failures)))
                     ),
                     "new_failures": list(new_failures),
                     "previously_failing_now_passing": list(previously_failing_now_passing),
                 }
 
-        # Criterion 2 check: Were the original failing tests resolved?
-        original_tests_now_passing = baseline_test_names - post_test_names
+            return {
+                "status": "stop",
+                "evidence": (
+                    "The originally failing tests still fail. New failures "
+                    "({0}) are acceptable but no progress was made.".format(
+                        ', '.join(sorted(new_failures))
+                    )
+                ),
+                "new_failures": list(new_failures),
+                "previously_failing_now_passing": list(previously_failing_now_passing),
+            }
 
-        if original_tests_now_passing and not new_failures:
+        # Criterion 2 check: Were the original failing tests resolved?
+        remaining_failing = baseline_test_names - previously_failing_now_passing
+
+        if previously_failing_now_passing and not remaining_failing:
             # The originally failing tests now pass, and no new failures
             return {
                 "status": "success",
                 "evidence": "Originally failing tests now pass: {0}. No new failures introduced.".format(
-                    ', '.join(original_tests_now_passing)
+                    ', '.join(sorted(previously_failing_now_passing))
                 ),
                 "new_failures": [],
-                "previously_failing_now_passing": list(original_tests_now_passing),
+                "previously_failing_now_passing": list(previously_failing_now_passing),
             }
 
-        # If we get here, the original tests still fail and/or there are new failures
-        # that are not acceptable
-        remaining_failing_count = len(baseline_test_names - previously_failing_now_passing)
+        # Partial progress: some originally failing tests now pass while
+        # others still fail, and no new failures were introduced. There is
+        # new evidence to work with, so a bounded retry is worthwhile.
+        if previously_failing_now_passing and not new_failures:
+            return {
+                "status": "retry",
+                "evidence": (
+                    "Partial progress: {0} now pass, {1} still failing. "
+                    "No new failures introduced - retrying with updated diagnostics.".format(
+                        len(previously_failing_now_passing), len(remaining_failing)
+                    )
+                ),
+                "new_failures": [],
+                "previously_failing_now_passing": list(previously_failing_now_passing),
+            }
+
         return {
             "status": "stop",
-            "evidence": f"Repair not verified. Original tests still failing: {remaining_failing_count}, New failures: {len(new_failures)}",
+            "evidence": f"Repair not verified. Original tests still failing: {len(remaining_failing)}, New failures: {len(new_failures)}",
             "new_failures": list(new_failures) if new_failures else [],
             "previously_failing_now_passing": list(previously_failing_now_passing),
         }

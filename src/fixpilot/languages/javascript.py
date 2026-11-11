@@ -11,8 +11,7 @@ JAVASCRIPT_CONFIG = LanguageConfig(
     default_test_command=["npm", "test"],
     build_commands=["npm", "install"],
     sandbox_image="fixpilot-sandbox:node",
-    test_frameworks=["jest", "vitest", "mocha", "ava", "tape"],
-    language_specific_flags={
+    test_frameworks=["jest", "vitest", "mocha", "ava", "tape"],    language_specific_flags={
         "npm_registry": "--registry",
         "jest_coverage": "--coverage",
         "vitest_coverage": "--coverage",
@@ -26,7 +25,7 @@ TYPESCRIPT_CONFIG = LanguageConfig(
     test_patterns=["test_*.ts", "*_test.ts", "*.spec.ts", "*.test.ts", "__tests__/**"],
     config_files=["package.json", "tsconfig.json", "jest.config.ts", "vitest.config.ts"],
     default_test_command=["npm", "test"],
-    build_commands=["npm install", "npm ci", "npm run build"],
+    build_commands=["npm", "install"],
     sandbox_image="fixpilot-sandbox:node",
     test_frameworks=["jest", "vitest", "mocha", "ava"],
     language_specific_flags={

@@ -3,7 +3,6 @@
 Provides language detection and configuration lookup.
 """
 
-import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -12,7 +11,7 @@ from fixpilot.languages.python import get_config as get_python_config
 from fixpilot.languages.javascript import get_javascript_config, get_typescript_config
 from fixpilot.languages.go import get_config as get_go_config
 from fixpilot.languages.rust import get_config as get_rust_config
-from fixpilot.languages.java import get_maven_config, get_gradle_config, get_java_config
+from fixpilot.languages.java import get_maven_config, get_gradle_config
 
 
 # Registry of all language configurations

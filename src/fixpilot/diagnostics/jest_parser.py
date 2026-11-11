@@ -2,142 +2,216 @@
 
 Responsibilities:
 - Parse Jest output and extract failure information.
+- Handle both the default reporter output and the ``--verbose`` reporter.
 - Extract exception type, message, file, line, stack frames, failing test.
 - Produce structured diagnostic evidence.
 """
 
 import re
-from typing import List
+from typing import List, Optional
 
 from fixpilot.schemas.diagnostics import DiagnosticEvidence
 from fixpilot.diagnostics.base import DiagnosticParser, PARSER_REGISTRY
 
 
+# Test file extensions Jest may report (js, jsx, ts, tsx, mjs, cjs).
+_TEST_FILE_RE = r"[^\s]*\.(?:js|jsx|ts|tsx|mjs|cjs)"
+
+# "  ✕ test description (2 ms)" - unicode and ASCII markers.
+_FAILING_TEST_RE = re.compile(r"^\s*[\u2715\u00d7xX]\s+(.+?)\s+\([\d.]+\s*m?s\)")
+
+# "  ● Test description" or "  * Test description"
+_BULLET_RE = re.compile(r"^\s*[\u25cf*]\s+(.+)$")
+
+# "    at Object.<anonymous> (src/file.js:18:24)"
+_STACK_WITH_PAREN_RE = re.compile(r"^\s+at\s+(.+?)\s+\((.+):(\d+):(\d+)\)")
+
+# "    at src/file.js:18:24"
+_STACK_SIMPLE_RE = re.compile(r"^\s+at\s+(.+):(\d+):(\d+)")
+
+
 class JestParser(DiagnosticParser):
     """Parser for Jest output."""
 
+    def __init__(self, language: str = "javascript"):
+        self._language = language
+
     @property
     def language(self) -> str:
-        return "javascript"
+        return self._language
 
     @property
     def test_framework(self) -> str:
         return "jest"
 
     def parse(self, output: str, stderr: str = "") -> List[DiagnosticEvidence]:
-        """Parse Jest output and extract failure information."""
-        failures = []
-        full_output = output + "\n" + stderr
+        """Parse Jest output and extract failure information.
 
-        # Jest output patterns:
-        # FAIL ./path/to/test.js
-        #   ✕ test description (time)
-        #   ● Test description
-        #   Expected: ...
-        #   Received: ...
-        #   at file:line:col
-        #   at Object.<anonymous> (file:line:col)
+        Two reporter styles are supported:
 
-        lines = full_output.split("\n")
-        current_test = None
-        current_error = None
-        current_traceback = []
-        current_file_refs = []
-        current_suite = None
+        * default reporter - a ``●`` bullet introduces each failure and the
+          bullet text is the failing test name.
+        * ``--verbose`` reporter - a ``✕`` marker names the failing test and a
+          following ``●`` bullet introduces its error detail.
+        """
+        failures: List[DiagnosticEvidence] = []
+        full_output = (output or "") + "\n" + (stderr or "")
 
-        for i, line in enumerate(lines):
-            # Match "FAIL ./test_file.js" - test suite (file path only)
-            suite_fail = re.match(r"^\s*FAIL\s+(.+?\.js)\b", line)
+        current_test: Optional[str] = None
+        current_error_lines: List[str] = []
+        current_traceback: List[dict] = []
+        current_file_refs: List[str] = []
+        current_suite: Optional[str] = None
+        in_error_block = False
+
+        def flush() -> None:
+            nonlocal current_test, current_error_lines, current_traceback
+            nonlocal current_file_refs, in_error_block
+            if current_test is not None:
+                error = "\n".join(current_error_lines).strip()
+                failures.append(
+                    self._build_evidence(
+                        current_test,
+                        error or f"Test '{current_test}' failed",
+                        current_traceback,
+                        current_file_refs,
+                    )
+                )
+            current_test = None
+            current_error_lines = []
+            current_traceback = []
+            current_file_refs = []
+            in_error_block = False
+
+        for line in full_output.split("\n"):
+            # "FAIL ./src/test.js" - failing suite
+            suite_fail = re.match(rf"^\s*FAIL\s+({_TEST_FILE_RE})", line)
             if suite_fail:
+                flush()
                 current_suite = suite_fail.group(1).strip()
                 continue
 
-            # Match "  ✕ test description (time)" - individual failing test
-            # Jest times can be "(2 ms)", "(2s)", "(2.5s)" or "(7.86 s)"
-            # Support both unicode (✕ ×) and ASCII (x X) markers
-            test_fail = re.match(r"^\s*[✕×xX]\s+(.+?)\s+\([\d.]+\s*m?s\)", line)
+            # "PASS ./src/test.js" - successful suite
+            suite_pass = re.match(rf"^\s*PASS\s+({_TEST_FILE_RE})", line)
+            if suite_pass:
+                continue
+
+            # "  ✕ test description (2 ms)" - failing test (verbose reporter)
+            test_fail = _FAILING_TEST_RE.match(line)
             if test_fail:
-                # Save previous test if any
-                if current_test and current_error:
-                    failures.append(self._build_evidence(
-                        current_test, current_error, current_traceback, current_file_refs
-                    ))
+                flush()
                 test_name = test_fail.group(1).strip()
-                # Prefix with suite name if available
-                if current_suite:
-                    current_test = f"{current_suite} › {test_name}"
-                else:
-                    current_test = test_name
-                current_error = ""
+                current_test = f"{current_suite} > {test_name}" if current_suite else test_name
+                current_error_lines = []
                 current_traceback = []
                 current_file_refs = []
+                in_error_block = False
                 continue
 
-            # Match test description with bullet: "  ● Test description" or "  * Test description"
-            bullet_match = re.match(r"^\s*[●\*]\s+(.+)$", line)
-            if bullet_match and current_test:
-                current_error = bullet_match.group(1).strip()
+            # "  ● Test description" - failure bullet / error detail header
+            bullet_match = _BULLET_RE.match(line)
+            if bullet_match:
+                name = bullet_match.group(1).strip()
+                if current_test is None:
+                    # Default reporter: the bullet *is* the failing test.
+                    current_test = name
+                    current_error_lines = []
+                    current_traceback = []
+                    current_file_refs = []
+                    in_error_block = True
+                elif not current_error_lines:
+                    # Verbose reporter: detail header for the known test.
+                    # The bullet text carries the fuller "Suite > test" name.
+                    current_test = name
+                    in_error_block = True
+                else:
+                    # A previous failure already has content - start a new one.
+                    flush()
+                    current_test = name
+                    current_error_lines = []
+                    current_traceback = []
+                    current_file_refs = []
+                    in_error_block = True
                 continue
 
-            # Match "Expected:" / "Received:" lines
-            if current_test and (line.strip().startswith("Expected:") or line.strip().startswith("Received:")):
-                current_error += "\n" + line.strip()
-                continue
-
-            # Match stack trace lines: "    at file:line:col"
-            # or "    at Object.<anonymous> (file:line:col)"
-            stack_match = re.match(r"^\s+at\s+(.+?)\s+\((.+):(\d+):(\d+)\)", line)
-            if stack_match and current_test:
+            # Stack trace frames
+            stack_match = _STACK_WITH_PAREN_RE.match(line)
+            if stack_match:
                 file_path = stack_match.group(2)
-                line_num = int(stack_match.group(3))
                 current_traceback.append({
                     "file": file_path,
-                    "line": line_num,
+                    "line": int(stack_match.group(3)),
                     "function": stack_match.group(1),
                 })
                 if file_path not in current_file_refs:
                     current_file_refs.append(file_path)
                 continue
 
-            # Match simpler stack trace: "    at file:line:col"
-            simple_stack = re.match(r"^\s+at\s+(.+):(\d+):(\d+)", line)
-            if simple_stack and current_test:
+            simple_stack = _STACK_SIMPLE_RE.match(line)
+            if simple_stack:
                 file_path = simple_stack.group(1)
-                line_num = int(simple_stack.group(2))
                 current_traceback.append({
                     "file": file_path,
-                    "line": line_num,
+                    "line": int(simple_stack.group(2)),
                     "function": "anonymous",
                 })
                 if file_path not in current_file_refs:
                     current_file_refs.append(file_path)
                 continue
 
-        # Don't forget the last test
-        if current_test and current_error:
-            failures.append(self._build_evidence(
-                current_test, current_error, current_traceback, current_file_refs
-            ))
+            # Everything else inside an error block is error detail.
+            if current_test is not None and in_error_block:
+                # Stop at the reporter's summary block.
+                if re.match(r"^\s*(Test Suites|Tests|Snapshots|Time|Ran all test suites)\b", line):
+                    in_error_block = False
+                    continue
+                stripped = line.strip()
+                if stripped:
+                    current_error_lines.append(stripped)
+                elif current_error_lines:
+                    current_error_lines.append("")
+
+        # Don't forget the last failure
+        flush()
 
         return failures
 
-    def _build_evidence(self, test_name: str, error: str, traceback_frames: list, file_refs: list):
+    def _build_evidence(
+        self, test_name: str, error: str, traceback_frames: list, file_refs: list
+    ) -> DiagnosticEvidence:
         """Build DiagnosticEvidence from parsed data."""
         exception_type = "AssertionError"
         exception_message = error
 
         # Try to extract exception type from error
-        if "TypeError" in error:
-            exception_type = "TypeError"
-        elif "ReferenceError" in error:
-            exception_type = "ReferenceError"
-        elif "SyntaxError" in error:
-            exception_type = "SyntaxError"
+        for known in (
+            "TypeError",
+            "ReferenceError",
+            "SyntaxError",
+            "RangeError",
+            "AssertionError",
+        ):
+            if known in error:
+                exception_type = known
+                break
 
-        traceback_str = "\n".join(
-            f'File "{f["file"]}", line {f["line"]}, in {f["function"]}'
-            for f in traceback_frames
-        ) if traceback_frames else "No traceback available"
+        # "TypeError: message" -> use the message part only.
+        first_line = error.split("\n")[0] if error else ""
+        match = re.match(r"^([A-Za-z]*Error|AssertionError)\s*:\s*(.+)$", first_line)
+        if match:
+            exception_type = match.group(1)
+            exception_message = match.group(2).strip() or error
+        else:
+            exception_message = error.strip()
+
+        traceback_str = (
+            "\n".join(
+                f'File "{f["file"]}", line {f["line"]}, in {f["function"]}'
+                for f in traceback_frames
+            )
+            if traceback_frames
+            else "No traceback available"
+        )
 
         line_range = (0, 0)
         if traceback_frames:
@@ -153,10 +227,11 @@ class JestParser(DiagnosticParser):
             line_range=line_range,
             snippet="",
             redacting=False,
-            language="javascript",
+            language=self._language,
             test_framework="jest",
         )
 
 
-# Register the parser
-PARSER_REGISTRY.register(JestParser())
+# Register the parser for JavaScript and TypeScript.
+PARSER_REGISTRY.register(JestParser("javascript"))
+PARSER_REGISTRY.register(JestParser("typescript"))

@@ -14,9 +14,9 @@ defined in PROJECT_SPEC.md §7.2.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from fixpilot.llm.provider import BaseLLMProvider, LLMProviderError
+from fixpilot.llm.provider import BaseLLMProvider
 from fixpilot.schemas.investigation import InvestigationResult, RootCauseHypothesis
 from fixpilot.diagnostics import parse_pytest_output, parse_traceback, redact_sensitive_data, PARSER_REGISTRY
 
@@ -61,10 +61,10 @@ class Investigator:
         test_framework = config.get("test_framework", config.get("FIXPILOT_TEST_FRAMEWORK", ""))
 
         # Parse the diagnostics using appropriate parser
-        if "parsed_failures" in diagnostics:
-            parsed_failures = diagnostics["parsed_failures"]
-        else:
-            # Try to get appropriate parser
+        parsed_failures = diagnostics.get("parsed_failures") or []
+        if not parsed_failures:
+            # Nothing was parsed yet (or the parser found nothing) - try the
+            # raw output so the investigation still has real evidence.
             parser = None
             if language and test_framework:
                 parser = PARSER_REGISTRY.get_parser(language, test_framework)
@@ -102,6 +102,29 @@ class Investigator:
                     parsed_failures, traceback_evidence, test_id, language
                 )
 
+        # A response without a single hypothesis is not usable: the repair
+        # plan would not know which files to look at. Fall back to the
+        # diagnostic-derived investigation in that case (this is real
+        # evidence, not a fabricated hypothesis).
+        if not structured.get("root_cause_hypotheses"):
+            logger.info(
+                "The LLM returned no usable hypothesis - falling back to the "
+                "diagnostic-derived investigation."
+            )
+            fallback = self._fallback_investigation(
+                parsed_failures, traceback_evidence, test_id, language
+            )
+            # Keep whatever the LLM did provide (summary, evidence) and only
+            # replace the missing parts.
+            structured = {
+                **structured,
+                "root_cause_hypotheses": fallback.get("root_cause_hypotheses", []),
+                "affected_files": structured.get("affected_files")
+                or fallback.get("affected_files", []),
+            }
+            if not structured.get("affected_files"):
+                structured["affected_files"] = fallback.get("affected_files", [])
+
         # Construct and return the InvestigationResult
         return self._build_investigation_result(structured, test_id, traceback_evidence)
 
@@ -137,6 +160,16 @@ class Investigator:
         elif traceback_evidence:
             traceback_summary = traceback_evidence.summary
 
+        # The raw runner output is the most valuable evidence available -
+        # without it the model only sees a one-line summary.
+        raw_output = (project_metadata.get("test_output") or "").strip()
+        if not raw_output:
+            raw_output = (project_metadata.get("stderr") or "").strip()
+        if raw_output:
+            if len(raw_output) > 8000:
+                raw_output = raw_output[:8000] + "\n... [truncated]"
+            raw_output = redact_sensitive_data(raw_output)
+
         # Build the prompt
         prompt = f"""You are FixPilot AI, an autonomous software debugging agent.
 
@@ -149,10 +182,13 @@ Analyze the following {language or "Python"} test failure evidence and identify 
 - Affected files: {', '.join(affected_files)}
 
 ## Failure Evidence
-### Test Output:
+### Raw Test Runner Output:
 <test_output>
-{failure_evidence}
+{raw_output or "No raw output captured"}
 </test_output>
+
+### Failure Summary:
+{failure_evidence}
 
 ### Traceback:
 <traceback>

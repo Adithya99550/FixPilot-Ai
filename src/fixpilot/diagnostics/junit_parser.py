@@ -17,9 +17,12 @@ from fixpilot.diagnostics.base import DiagnosticParser, PARSER_REGISTRY
 class JUnitParser(DiagnosticParser):
     """Parser for JUnit XML output."""
 
+    def __init__(self, language: str = "java"):
+        self._language = language
+
     @property
     def language(self) -> str:
-        return "java"
+        return self._language
 
     @property
     def test_framework(self) -> str:
@@ -112,9 +115,10 @@ class JUnitParser(DiagnosticParser):
     def _extract_location(self, stack_trace: str) -> tuple:
         """Extract file path and line number from Java stack trace."""
         # Java stack trace pattern: "at package.Class.method(File.java:123)"
+        # NOTE: there is no space between the method name and the "(".
         patterns = [
-            r"at\s+[\w\.$]+\s+\((\S+\.java):(\d+)\)",
-            r"at\s+[\w\.$]+\s+\((\S+\.kt):(\d+)\)",
+            r"at\s+[\w\.$]+\((\S+\.java):(\d+)\)",
+            r"at\s+[\w\.$]+\((\S+\.kt):(\d+)\)",
             r"(\S+\.java):(\d+)",
         ]
 
@@ -224,10 +228,11 @@ class JUnitParser(DiagnosticParser):
             line_range=line_range,
             snippet="",
             redacting=False,
-            language="java",
+            language=self._language,
             test_framework="junit",
         )
 
 
-# Register the parser
-PARSER_REGISTRY.register(JUnitParser())
+# Register the parser for every Java language id used by the registry.
+for _java_language in ("java", "java-maven", "java-gradle"):
+    PARSER_REGISTRY.register(JUnitParser(_java_language))
