@@ -19,7 +19,7 @@ defined in PROJECT_SPEC.md §7.4.
 
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fixpilot.schemas.patch import PatchResult
 from fixpilot.schemas.repair_plan import RepairPlan
@@ -33,12 +33,20 @@ class RepairGenerationError(Exception):
     """Raised when a repair patch could not be generated.
 
     This is a *hard* failure: the workflow must never continue with a
-    fabricated or empty patch.
+    fabricated or empty patch. ``recoverable`` marks the errors that a
+    second attempt with feedback can fix (a malformed diff, an empty
+    response).
     """
 
-    def __init__(self, message: str, cause: Optional[BaseException] = None):
+    def __init__(
+        self,
+        message: str,
+        cause: Optional[BaseException] = None,
+        recoverable: bool = False,
+    ):
         super().__init__(message)
         self.cause = cause
+        self.recoverable = recoverable
 
 
 class Repairer:
@@ -97,7 +105,8 @@ class Repairer:
         if not patch_text:
             raise RepairGenerationError(
                 "The LLM returned an empty response, so no repair patch could "
-                "be generated."
+                "be generated.",
+                recoverable=True,
             )
 
         # Models frequently miscount the lines of a hunk or truncate the
@@ -179,7 +188,19 @@ class Repairer:
             "2. Do not include markdown code block backticks (no ```diff).\n"
             "3. Make the minimal necessary change to fix the failing tests.\n"
             "4. The diff must contain at least one added or removed line.\n"
+            "5. Every hunk header must look exactly like "
+            "`@@ -<line>,<count> +<line>,<count> @@` and every context line "
+            "must be copied *exactly* from the source file - including its "
+            "indentation.\n"
         )
+
+        feedback = context.get("feedback")
+        if feedback:
+            prompt += (
+                "\nIMPORTANT: your previous answer could not be used:\n"
+                f"{feedback}\n"
+                "Produce a corrected, complete unified diff this time.\n"
+            )
 
         if lang_guidance:
             prompt += f"\n{lang_guidance}\n"
@@ -236,13 +257,17 @@ class Repairer:
 
     @staticmethod
     def _normalize_hunks(patch_text: str) -> str:
-        """Repair hunk headers whose line counts do not match their body.
+        """Repair hunk headers that are malformed or inconsistent.
 
         Language models frequently emit a hunk header such as
         ``@@ -37,5 +37,5 @@`` while only including four context lines, or
-        truncate the header (``@@ -1,2 +1,2``). The *body* of the hunk is
+        truncate the header completely (``@@ -``). The *body* of the hunk is
         the authoritative part - it is what actually gets applied - so the
         header is rewritten to match it.
+
+        A header that cannot be parsed at all is replaced by a synthetic one;
+        the applier then locates the hunk by its content, which does not need
+        a line number.
 
         Only the header is touched: the patch content, the file paths and
         therefore every security check stay exactly as the model produced
@@ -263,39 +288,32 @@ class Repairer:
         header_re = re.compile(
             r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s*(@@.*)?$"
         )
+        body_prefixes = (" ", "+", "-")
 
         while index < len(lines):
             line = lines[index]
             match = header_re.match(line)
-            if not match:
-                result.append(line)
-                index += 1
+            if not (line.startswith("@@") and match):
+                if line.startswith("@@"):
+                    # A broken header: try to rescue the hunk below it.
+                    rescued = Repairer._rescue_hunk(lines, index)
+                    if rescued is None:
+                        result.append(line)
+                        index += 1
+                    else:
+                        header, body, index = rescued
+                        result.append(header)
+                        result.extend(body)
+                else:
+                    result.append(line)
+                    index += 1
                 continue
 
             old_start = int(match.group(1))
             new_start = int(match.group(3))
             section = match.group(5) or ""
 
-            # Count the body lines of this hunk.
-            body: List[str] = []
-            cursor = index + 1
-            while cursor < len(lines):
-                candidate = lines[cursor]
-                if candidate.startswith("@@") or candidate.startswith("--- ") \
-                        or candidate.startswith("+++ ") or candidate.startswith("diff --git "):
-                    break
-                if candidate.startswith("\\"):
-                    cursor += 1
-                    continue
-                if candidate and candidate[0] in (" ", "+", "-"):
-                    body.append(candidate)
-                    cursor += 1
-                    continue
-                if candidate == "":
-                    body.append(candidate)
-                    cursor += 1
-                    continue
-                break
+            body, index = Repairer._collect_hunk_body(lines, index + 1)
 
             old_count = sum(1 for entry in body if entry[:1] in (" ", "-"))
             new_count = sum(1 for entry in body if entry[:1] in (" ", "+"))
@@ -310,9 +328,58 @@ class Repairer:
                 ).rstrip()
             )
             result.extend(body)
-            index = cursor
 
         return "\n".join(result)
+
+    @staticmethod
+    def _collect_hunk_body(lines: List[str], start: int) -> Tuple[List[str], int]:
+        """Collect the body lines of a hunk.
+
+        Args:
+            lines: All lines of the diff.
+            start: Index of the first body line.
+
+        Returns:
+            (body_lines, index_after_the_hunk)
+        """
+        body: List[str] = []
+        cursor = start
+        while cursor < len(lines):
+            candidate = lines[cursor]
+            if candidate.startswith("@@") or candidate.startswith("--- ") \
+                    or candidate.startswith("+++ ") or candidate.startswith("diff --git "):
+                break
+            if candidate.startswith("\\"):
+                cursor += 1
+                continue
+            if candidate == "" or candidate[:1] in (" ", "+", "-"):
+                body.append(candidate)
+                cursor += 1
+                continue
+            break
+        return body, cursor
+
+    @staticmethod
+    def _rescue_hunk(lines: List[str], index: int) -> Optional[Tuple[str, List[str], int]]:
+        """Rebuild a hunk whose header is unusable.
+
+        Args:
+            lines: All lines of the diff.
+            index: Index of the broken header.
+
+        Returns:
+            ``(header, body, index_after_the_hunk)`` or None when the lines
+            below the header are not a usable hunk.
+        """
+        body, cursor = Repairer._collect_hunk_body(lines, index + 1)
+        meaningful = [entry for entry in body if entry[:1] in (" ", "+", "-")]
+        if not meaningful:
+            return None
+
+        old_count = sum(1 for entry in body if entry[:1] in (" ", "-"))
+        new_count = sum(1 for entry in body if entry[:1] in (" ", "+"))
+        header = "@@ -1,{0} +1,{1} @@".format(old_count, new_count)
+        return header, body, cursor
 
     @staticmethod
     def _describe_llm_error(exc: Exception) -> str:
@@ -342,18 +409,20 @@ class Repairer:
             file_patches = parse_unified_diff(patch_text)
         except PatchValidationError as exc:
             raise RepairGenerationError(
-                f"The LLM returned a malformed unified diff: {exc}"
+                f"The LLM returned a malformed unified diff: {exc}",
+                recoverable=True,
             ) from exc
 
         if not file_patches:
             raise RepairGenerationError(
-                "The LLM did not return any file changes."
+                "The LLM did not return any file changes.", recoverable=True
             )
 
         changed_lines = sum(fp.changed_lines for fp in file_patches)
         if changed_lines == 0:
             raise RepairGenerationError(
-                "The LLM returned a patch without any actual changes."
+                "The LLM returned a patch without any actual changes.",
+                recoverable=True,
             )
 
     # ------------------------------------------------------------------

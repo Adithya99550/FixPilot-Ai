@@ -131,9 +131,20 @@ class Database:
             ("final_test_exit_code", "INTEGER"),
             ("final_test_output", "TEXT"),
             ("attempt_count", "INTEGER"),
+            ("baseline_test_output", "TEXT"),
+            ("delivery_status", "TEXT"),
+            ("delivery_files", "TEXT"),
+            ("delivery_backup", "TEXT"),
         ):
             if column not in run_columns:
                 cursor.execute(f"ALTER TABLE runs ADD COLUMN {column} {ddl}")
+
+        # Migration: record whether a patch could actually be applied.
+        attempt_columns = [
+            row[1] for row in cursor.execute("PRAGMA table_info(attempts)").fetchall()
+        ]
+        if "apply_status" not in attempt_columns:
+            cursor.execute("ALTER TABLE attempts ADD COLUMN apply_status TEXT")
 
         # Create audits table (static bug scan results)
         cursor.execute("""
@@ -241,6 +252,10 @@ class Database:
         attempt_count: int = None,
         baseline_exit_code: int = None,
         retry_count: int = None,
+        baseline_test_output: str = None,
+        delivery_status: str = None,
+        delivery_files: str = None,
+        delivery_backup: str = None,
     ):
         """Persist the final test outcome of a run.
 
@@ -252,6 +267,11 @@ class Database:
             attempt_count: Number of repair attempts that were made.
             baseline_exit_code: Exit code of the baseline (pre-repair) run.
             retry_count: Number of retries that were made (attempts - 1).
+            baseline_test_output: (Truncated) output of the baseline run.
+            delivery_status: Whether the verified patch reached the original
+                project.
+            delivery_files: Comma separated list of delivered files.
+            delivery_backup: Path of the backup of the original files.
         """
         updates = []
         params = []
@@ -274,6 +294,18 @@ class Database:
         if retry_count is not None:
             updates.append("retry_count = ?")
             params.append(retry_count)
+        if baseline_test_output is not None:
+            updates.append("baseline_test_output = ?")
+            params.append(baseline_test_output)
+        if delivery_status is not None:
+            updates.append("delivery_status = ?")
+            params.append(delivery_status)
+        if delivery_files is not None:
+            updates.append("delivery_files = ?")
+            params.append(delivery_files)
+        if delivery_backup is not None:
+            updates.append("delivery_backup = ?")
+            params.append(delivery_backup)
 
         if not updates:
             return
@@ -331,8 +363,8 @@ class Database:
                 INSERT INTO attempts (
                     attempt_id, run_id, attempt_number, root_cause_summary,
                     patch_summary, patch_path, patch_diff, approval_status,
-                    test_status, verification_status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    test_status, verification_status, created_at, apply_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attempt_id,
@@ -346,6 +378,7 @@ class Database:
                     "pending",
                     "pending",
                     now,
+                    "pending",
                 ),
             )
             self._conn.commit()
@@ -355,7 +388,8 @@ class Database:
 
     def update_attempt_status(
         self, attempt_id: str, test_status: str = None,
-        verification_status: str = None, approval_status: str = None
+        verification_status: str = None, approval_status: str = None,
+        apply_status: str = None
     ):
         """Update an attempt's test, verification and approval status.
 
@@ -364,6 +398,8 @@ class Database:
             test_status: The test result status.
             verification_status: The verification result status.
             approval_status: The approval decision (e.g. APPROVED / REJECTED).
+            apply_status: Whether the patch could be applied
+                (APPLIED / FAILED / REJECTED / NOT_REQUESTED).
         """
         updates = []
         params = []
@@ -377,6 +413,9 @@ class Database:
         if approval_status is not None:
             updates.append("approval_status = ?")
             params.append(approval_status)
+        if apply_status is not None:
+            updates.append("apply_status = ?")
+            params.append(apply_status)
         if test_status is not None or verification_status is not None:
             # The attempt reached the point where it was actually executed.
             updates.append("applied_at = ?")
@@ -691,6 +730,10 @@ class Storage:
         attempt_count: int = None,
         baseline_exit_code: int = None,
         retry_count: int = None,
+        baseline_test_output: str = None,
+        delivery_status: str = None,
+        delivery_files: str = None,
+        delivery_backup: str = None,
     ):
         """Persist the final test outcome of a run."""
         self.db.update_run_results(
@@ -701,6 +744,10 @@ class Storage:
             attempt_count=attempt_count,
             baseline_exit_code=baseline_exit_code,
             retry_count=retry_count,
+            baseline_test_output=baseline_test_output,
+            delivery_status=delivery_status,
+            delivery_files=delivery_files,
+            delivery_backup=delivery_backup,
         )
 
     def record_attempt(
@@ -717,10 +764,12 @@ class Storage:
 
     def update_attempt(
         self, attempt_id: str, test_status: str = None,
-        verification_status: str = None, approval_status: str = None
+        verification_status: str = None, approval_status: str = None,
+        apply_status: str = None
     ):
         self.db.update_attempt_status(
-            attempt_id, test_status, verification_status, approval_status
+            attempt_id, test_status, verification_status, approval_status,
+            apply_status,
         )
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:

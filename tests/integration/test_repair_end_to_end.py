@@ -10,6 +10,7 @@ verify that:
 """
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -184,3 +185,62 @@ class TestEndToEndRepair:
         assert result.get("message") == "All tests pass"
         # No patch was generated at all.
         assert storage.get_run_attempts(result["run_id"]) == []
+
+
+class TestDeliveryToOriginal:
+    """The verified patch may be delivered to the original project."""
+
+    def test_approved_delivery_updates_the_original(self, broken_project, tmp_path):
+        """After verification the original project can be updated."""
+        llm = FakeLLMProvider([INVESTIGATION_JSON, GOOD_PATCH])
+        engine, storage = _engine(tmp_path, llm)
+        result = engine.execute(
+            broken_project, auto_approve=True, apply_to_original=True
+        )
+        assert result["status"] == RunStatus.SUCCESS
+        delivery = result["delivery"]
+        assert delivery["delivered"] is True
+        assert delivery["changed_files"] == ["calculator.py"]
+
+        # The original project now contains the fix ...
+        assert (broken_project / "calculator.py").read_text(encoding="utf-8") == (
+            FIXED_SOURCE
+        )
+        # ... and its tests really pass.
+        test_result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q"],
+            cwd=str(broken_project),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert test_result.returncode == 0, test_result.stdout
+
+    def test_rejected_delivery_leaves_the_original_unchanged(
+        self, broken_project, tmp_path, monkeypatch
+    ):
+        """Without an explicit approval the original project is untouched."""
+        llm = FakeLLMProvider([INVESTIGATION_JSON, GOOD_PATCH])
+        engine, storage = _engine(tmp_path, llm)
+        monkeypatch.setattr(
+            "fixpilot.workflow.engine.WorkflowEngine._ask_for_approval",
+            lambda self, prompt="": False,
+        )
+        result = engine.execute(broken_project, auto_approve=True)
+
+        assert result["status"] == RunStatus.SUCCESS
+        delivery = result["delivery"]
+        assert delivery["delivered"] is False
+        assert (broken_project / "calculator.py").read_text(encoding="utf-8") == (
+            BROKEN_SOURCE
+        )
+
+    def test_no_delivery_without_the_option(self, broken_project, tmp_path):
+        """The default run never touches the original project."""
+        llm = FakeLLMProvider([INVESTIGATION_JSON, GOOD_PATCH])
+        engine, storage = _engine(tmp_path, llm)
+        result = engine.execute(broken_project, auto_approve=True)
+        assert result["status"] == RunStatus.SUCCESS
+        assert (broken_project / "calculator.py").read_text(encoding="utf-8") == (
+            BROKEN_SOURCE
+        )

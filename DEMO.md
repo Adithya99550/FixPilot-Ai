@@ -69,6 +69,16 @@ Opens a Streamlit UI with run history, outcome charts, attempt details, and repo
 
 ---
 
+## Advanced Options
+
+```bash
+# Apply the verified patch to the original project (requires approval)
+fixpilot run sample_projects/off_by_one --apply-to-original
+
+# Deterministic demo mode (no LLM, scripted provider)
+fixpilot run sample_projects/off_by_one --demo
+```
+
 ## Honest Limitations
 
 - **It cannot fix what isn't tested.** No failing test → it reports "nothing to repair."

@@ -711,9 +711,14 @@ class PatchApplier:
                         if tag == "+"
                     )
                     payload = (content + "\n").encode("utf-8") if content else b""
+                    self._check_result_syntax(target_rel, payload.decode("utf-8"))
                 else:
                     existing = target.read_text(encoding="utf-8")
                     updated = self._apply_hunks_to_text(existing, file_patch.hunks)
+                    # The result must still be valid source code - a patch
+                    # that breaks the syntax is rejected instead of being
+                    # written to disk.
+                    self._check_result_syntax(target_rel, updated)
                     payload = updated.encode("utf-8")
 
                 prepared.append((target_rel, target, payload))
@@ -901,49 +906,39 @@ class PatchApplier:
         return result
 
     @staticmethod
-    def _find_sequence(
-        lines: List[str], sequence: List[str], anchor: Optional[int]
-    ) -> Optional[int]:
-        """Find the exact position of ``sequence`` inside ``lines``.
+    def _check_result_syntax(target_rel: str, content: str) -> None:
+        """Reject a patch result that would not compile.
 
-        This is used as a *safe* fallback when the context lines of a hunk do
-        not match (LLMs frequently reproduce the surrounding lines slightly
-        differently). Only an **exact** match is accepted - no whitespace
-        insensitive or partial matching - so the patch can never rewrite an
-        unrelated part of the file.
+        A patch produced by a language model regularly has a context line
+        with the wrong indentation. Applying such a patch "successfully"
+        rewrites the indentation of the target file and the result is a
+        syntactically broken file - which then shows up later as a bogus
+        "regression" instead of a patch failure.
+
+        Compiling the result catches that class of bug *before* anything is
+        written to disk.
 
         Args:
-            lines: The lines of the target file.
-            sequence: The lines that must be found (the removed lines).
-            anchor: The expected position (used to prefer a nearby match).
+            target_rel: The workspace-relative path of the patched file.
+            content: The new file content.
 
-        Returns:
-            The index of the first matching line, or None when the sequence
-            does not occur in the file.
+        Raises:
+            PatchApplyError: If the result is not valid Python.
         """
-        if not sequence:
-            return anchor
-        if len(sequence) > len(lines):
-            return None
-
-        candidates = []
-        if anchor is not None:
-            window = 20
-            for offset in range(0, window + 1):
-                for candidate in (anchor - offset, anchor + offset):
-                    if 0 <= candidate and candidate + len(sequence) <= len(lines):
-                        if candidate not in candidates:
-                            candidates.append(candidate)
-
-        for candidate in candidates:
-            if lines[candidate:candidate + len(sequence)] == sequence:
-                return candidate
-
-        for candidate in range(0, len(lines) - len(sequence) + 1):
-            if lines[candidate:candidate + len(sequence)] == sequence:
-                return candidate
-
-        return None
+        if not target_rel.lower().endswith(".py"):
+            return
+        try:
+            compile(content, target_rel, "exec")
+        except SyntaxError as exc:
+            raise PatchApplyError(
+                "the patched file would not compile ({0} at line {1}: {2})".format(
+                    exc.msg, exc.lineno, exc.text.strip() if exc.text else "?"
+                )
+            ) from exc
+        except ValueError as exc:  # e.g. source containing null bytes
+            raise PatchApplyError(
+                f"the patched file is not valid source code ({exc})"
+            ) from exc
 
     @staticmethod
     def _locate_hunk(
@@ -968,17 +963,12 @@ class PatchApplier:
             if lines[candidate:candidate + len(old_lines)] == old_lines:
                 return candidate
 
-        # 3. Whitespace-insensitive match, restricted to the offset window
-        #    so an unrelated line elsewhere in the file is never touched.
-        if anchor is not None:
-            window = 20
-            stripped = [l.strip() for l in old_lines]
-            for offset in range(0, window + 1):
-                for candidate in (anchor - offset, anchor + offset):
-                    if candidate < 0 or candidate + len(old_lines) > len(lines):
-                        continue
-                    if [l.strip() for l in lines[candidate:candidate + len(old_lines)]] == stripped:
-                        return candidate
+        # NOTE: a whitespace-insensitive match is deliberately NOT attempted
+        # here. Matching "    total += i" against "        total += i" would
+        # silently rewrite the indentation of the target file and produce a
+        # syntactically broken file (which then shows up as a bogus
+        # "regression"). A patch whose context does not match exactly must
+        # fail instead - see _apply_hunks_to_text for the safe fuzz fallback.
 
         return None
 

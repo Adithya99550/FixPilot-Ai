@@ -47,6 +47,11 @@ logger = logging.getLogger("fixpilot.workflow")
 #: gives up (the model is clearly not able to produce a usable patch).
 MAX_CONSECUTIVE_INVALID_PATCHES = 2
 
+#: How often the model may be asked for a patch before the attempt fails.
+#: A malformed answer is retried with feedback - it is usually a typo in a
+#: hunk header, not a wrong diagnosis.
+MAX_PATCH_GENERATION_ATTEMPTS = 3
+
 
 class WorkflowEngine:
     """FixPilot end-to-end self-healing workflow orchestrator."""
@@ -94,6 +99,7 @@ class WorkflowEngine:
         project_path: Path,
         analysis_only: bool = False,
         auto_approve: bool = False,
+        apply_to_original: bool = False,
     ) -> Dict[str, Any]:
         """Execute the full repair workflow on a target project.
 
@@ -101,6 +107,9 @@ class WorkflowEngine:
             project_path: The project to analyse/repair.
             analysis_only: Stop after the investigation stage.
             auto_approve: Skip the interactive patch approval gate.
+            apply_to_original: Deliver a verified patch to the original
+                project (after the repair was verified in the disposable
+                workspace).
 
         Returns:
             A dict with at least ``run_id`` and ``status``.
@@ -108,6 +117,9 @@ class WorkflowEngine:
         project_path = Path(project_path).resolve()
         if not project_path.is_dir():
             raise ValueError(f"Project directory does not exist: {project_path}")
+
+        if apply_to_original:
+            self.config["FIXPILOT_APPLY_TO_ORIGINAL"] = True
 
         run_id = f"run_{uuid.uuid4().hex[:12]}"
         run_config = dict(self.config)
@@ -381,6 +393,8 @@ class WorkflowEngine:
         seen_patch_hashes: Dict[str, int] = {}
         consecutive_invalid = 0
         verification: Dict[str, Any] = {}
+        #: The patch that was verified successfully (if any).
+        verified_patch: str = ""
 
         while attempt_num < retry_manager.max_retries:
             attempt_num += 1
@@ -431,27 +445,27 @@ class WorkflowEngine:
                     print(f"Updated plan goal: {plan.goal}")
 
             # ---- Generate the patch ----------------------------------
-            try:
-                patch_result = repairer.generate_patch(
-                    plan,
-                    {
-                        "file_contents": file_contents,
-                        "changed_files": plan.files_to_change,
-                        "test_output": current_pre_result.stdout,
-                        "diagnostics": current_diagnostics,
-                    },
-                )
-            except RepairGenerationError as exc:
-                print(f"Repair generation failed: {exc}")
+            patch_result, generation_error = self._generate_patch_with_feedback(
+                repairer,
+                plan,
+                {
+                    "file_contents": file_contents,
+                    "changed_files": plan.files_to_change,
+                    "test_output": current_pre_result.stdout,
+                    "diagnostics": current_diagnostics,
+                },
+            )
+            if patch_result is None:
+                print(f"Repair generation failed: {generation_error}")
                 self.storage.create_attempt(
                     attempt_id, run_id, attempt_num,
-                    self._failed_patch_result(exc), self.config,
+                    self._failed_patch_result(generation_error), self.config,
                 )
                 self.storage.update_attempt(
                     attempt_id, "ERROR", "REPAIR_FAILED", approval_status="NOT_REQUESTED"
                 )
                 final_status = RunStatus.REPAIR_FAILED
-                final_reason = str(exc)
+                final_reason = str(generation_error)
                 break
 
             self.storage.create_attempt(
@@ -552,9 +566,12 @@ class WorkflowEngine:
             )
             if not applied:
                 print(f"Failed to apply patch: {apply_msg}")
-                self.storage.update_attempt(attempt_id, "APPLY_FAILED", "RETRY")
+                self.storage.update_attempt(
+                    attempt_id, "APPLY_FAILED", "RETRY", apply_status="FAILED"
+                )
                 final_reason = apply_msg
                 continue
+            self.storage.update_attempt(attempt_id, apply_status="APPLIED")
 
             # ---- Run the tests again ----------------------------------
             post_result = self.executor.run_tests(
@@ -590,6 +607,7 @@ class WorkflowEngine:
                 print("Repair successfully verified!")
                 final_status = RunStatus.SUCCESS
                 final_reason = verification.get("evidence", "Repair verified")
+                verified_patch = patch_result.patch
                 break
 
             if v_status == "regression":
@@ -598,10 +616,27 @@ class WorkflowEngine:
                 final_reason = verification.get("evidence", "Regression detected")
                 break
 
-            # Both "retry" (partial progress) and "stop" (no progress yet but
+            if verification.get("failure_kind") == "suite_not_executed":
+                # The test suite could not even run after the patch. This is
+                # a patch problem (the tests never executed), so the next
+                # attempt gets the collection error as fresh evidence.
+                print(
+                    "The test suite could not be executed after the patch - "
+                    "retrying with the new diagnostics."
+                )
+                current_pre_result = post_result
+                if retry_manager.should_retry(verification):
+                    continue
+                final_status = RunStatus.FAILED
+                final_reason = verification.get(
+                    "evidence", "The test suite could not be executed"
+                )
+                break
+
+            # "partial" (some tests fixed) and "stop" (no progress yet but
             # possibly new evidence) are routed through the retry gate. The
             # gate decides whether another attempt is worthwhile.
-            if v_status in ("retry", "stop") and retry_manager.should_retry(
+            if v_status in ("partial", "stop") and retry_manager.should_retry(
                 verification, attempt_number=attempt_num
             ):
                 print("Retrying repair with updated diagnostics...")
@@ -624,6 +659,16 @@ class WorkflowEngine:
                 f"reached without a verified repair"
             )
 
+        # ---- Optional delivery of the verified patch ------------------
+        delivery_result: Optional[Dict[str, Any]] = None
+        if verified_patch and final_status == RunStatus.SUCCESS:
+            delivery_result = self._deliver_verified_patch(
+                run_id=run_id,
+                project_path=project_path,
+                patch=verified_patch,
+                protected_paths=list(getattr(plan, "files_not_to_change", []) or []),
+            )
+
         return self._finish(
             run_id,
             final_status,
@@ -633,7 +678,77 @@ class WorkflowEngine:
             verification=verification,
             attempts=attempt_num,
             baseline_exit_code=baseline_result.exit_code,
+            delivery=delivery_result,
+            baseline_output=baseline_result.stdout,
         )
+
+    def _deliver_verified_patch(
+        self,
+        run_id: str,
+        project_path: Path,
+        patch: str,
+        protected_paths: List[str],
+    ) -> Dict[str, Any]:
+        """Offer the verified patch for delivery to the original project.
+
+        The original project is only touched after a **separate**, explicit
+        user approval. Without that approval nothing is written and the
+        original project stays exactly as it was.
+        """
+        from fixpilot.patching.delivery import deliver_patch
+
+        approved = bool(self.config.get("FIXPILOT_APPLY_TO_ORIGINAL", False))
+        if not approved and self.config.get("FIXPILOT_APPROVAL_REQUIRED", True):
+            print("\n" + "=" * 60)
+            print("The repair was verified in the disposable workspace.")
+            print("Apply the verified patch to the ORIGINAL project?")
+            print(f"  Target: {project_path}")
+            print("  (a backup of every changed file is created first)")
+            approved = self._ask_for_approval(
+                prompt="Apply the verified patch to the original project? [y/N]: "
+            )
+        elif not approved:
+            print(
+                "\n[i] The verified patch was NOT applied to the original "
+                "project (approval was not given)."
+            )
+
+        if not approved:
+            self.storage.log_event(
+                run_id, "DELIVER_PATCH", "Delivery declined by the user"
+            )
+            return {
+                "success": False,
+                "delivered": False,
+                "message": "The original project was left unchanged.",
+            }
+
+        result = deliver_patch(
+            patch,
+            project_path,
+            protected_paths=protected_paths,
+        )
+        self.storage.log_event(
+            run_id,
+            "DELIVER_PATCH",
+            result.message,
+            level="INFO" if result.success else "WARNING",
+            metadata=result.as_dict(),
+        )
+        if result.success:
+            print(f"[+] {result.message}")
+            if result.backup_path:
+                print(f"    Backup of the original files: {result.backup_path}")
+        else:
+            print(f"[!] {result.message}")
+        return {
+            "success": result.success,
+            "delivered": result.success,
+            "message": result.message,
+            "changed_files": result.changed_files,
+            "backup_path": str(result.backup_path) if result.backup_path else None,
+            "rolled_back": result.rolled_back,
+        }
 
     # ------------------------------------------------------------------
     # Helpers
@@ -745,6 +860,54 @@ class WorkflowEngine:
         }
 
     @staticmethod
+    def _generate_patch_with_feedback(
+        repairer: Repairer,
+        plan: Any,
+        context: Dict[str, Any],
+        max_attempts: int = MAX_PATCH_GENERATION_ATTEMPTS,
+    ) -> Tuple[Optional[Any], str]:
+        """Generate a patch, retrying with feedback when the model misbehaves.
+
+        A language model regularly returns a malformed diff (a truncated hunk
+        header, a file section without hunks, ...). Such an answer can be
+        corrected by telling the model what was wrong with it - so the model
+        is asked again with the error as feedback.
+
+        Errors that a second attempt cannot fix (no LLM configured, API
+        error, rate limit) are reported immediately.
+
+        Args:
+            repairer: The repairer agent.
+            plan: The repair plan.
+            context: The context for the repairer.
+            max_attempts: How many times the model may be asked.
+
+        Returns:
+            (patch_result, error_message) - exactly one of them is set.
+        """
+        feedback = ""
+        last_error = ""
+        for attempt in range(1, max_attempts + 1):
+            call_context = dict(context)
+            if feedback:
+                call_context["feedback"] = feedback
+            try:
+                return repairer.generate_patch(plan, call_context), ""
+            except RepairGenerationError as exc:
+                last_error = str(exc)
+                if not exc.recoverable or attempt >= max_attempts:
+                    break
+                feedback = last_error
+                logger.info(
+                    "Repair generation attempt %s/%s failed (%s) - asking the "
+                    "model again with feedback.",
+                    attempt,
+                    max_attempts,
+                    last_error,
+                )
+        return None, last_error or "No patch could be generated."
+
+    @staticmethod
     def _collect_file_contents(
         workspace_path: Path,
         plan: Any,
@@ -821,14 +984,16 @@ class WorkflowEngine:
         return existing[:limit]
 
     @staticmethod
-    def _ask_for_approval() -> bool:
-        """Ask the user to approve a patch.
+    def _ask_for_approval(
+        prompt: str = "Approve and apply this patch? [y/N]: "
+    ) -> bool:
+        """Ask the user for approval.
 
         A closed stdin (EOF) or a Ctrl+C is treated as a *rejection* - the
         safe default when no human is available to answer.
         """
         try:
-            answer = input("Approve and apply this patch? [y/N]: ")
+            answer = input(prompt)
         except (EOFError, KeyboardInterrupt):
             print()
             return False
@@ -858,6 +1023,8 @@ class WorkflowEngine:
         verification: Optional[Dict[str, Any]] = None,
         attempts: int = 0,
         baseline_exit_code: Optional[int] = None,
+        delivery: Optional[Dict[str, Any]] = None,
+        baseline_output: str = "",
     ) -> Dict[str, Any]:
         """Persist the final state of a run and build the result payload."""
         self.storage.complete_run(
@@ -876,6 +1043,12 @@ class WorkflowEngine:
             attempt_count=attempts,
             baseline_exit_code=baseline_exit_code,
             retry_count=max(attempts - 1, 0),
+            baseline_test_output=(
+                (baseline_output or "")[-20000:] if baseline_output else ""
+            ),
+            delivery_status=(delivery or {}).get("message", "") or None,
+            delivery_files=", ".join((delivery or {}).get("changed_files", [])) or None,
+            delivery_backup=(delivery or {}).get("backup_path"),
         )
         self.storage.log_event(
             run_id, "FINALIZE_REPORT",
@@ -911,6 +1084,9 @@ class WorkflowEngine:
         if final_result is not None:
             result["test_output"] = final_result.stdout
             result["test_exit_code"] = final_result.exit_code
+            result["test_stderr"] = final_result.stderr
+        if delivery is not None:
+            result["delivery"] = delivery
         return result
 
     @staticmethod

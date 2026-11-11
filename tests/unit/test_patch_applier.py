@@ -157,6 +157,78 @@ class TestValidatorApplierConsistency:
         assert (temp_workspace / "app.py").read_text(encoding="utf-8") == "value = 2\n"
 
 
+class TestIndentationSafety:
+    """Regression tests for the bug that made a correct patch look like a
+    regression.
+
+    A language model regularly reproduces a context line with the wrong
+    indentation. Matching such a context line "approximately" rewrote the
+    indentation of the target file and produced a syntactically broken file,
+    which later showed up as a bogus "regression" instead of a patch
+    failure.
+    """
+
+    SOURCE = (
+        "def sum_range(n):\n"
+        "    total = 0\n"
+        "    for i in range(1, n):  # off by one\n"
+        "        total += i\n"
+        "    return total\n"
+    )
+
+    #: The model produced a context line with 4 instead of 8 spaces.
+    WRONG_INDENT_CONTEXT = (
+        "--- a/sum_range.py\n"
+        "+++ b/sum_range.py\n"
+        "@@ -2,3 +2,3 @@\n"
+        "     total = 0\n"
+        "-    for i in range(1, n):  # off by one\n"
+        "+    for i in range(1, n + 1):  # off by one\n"
+        "     total += i\n"
+    )
+
+    def test_wrong_indentation_does_not_corrupt_the_file(self, tmp_path: Path):
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        (workspace / "sum_range.py").write_text(self.SOURCE, encoding="utf-8")
+
+        applier = PatchApplier()
+        success, message, _ = applier.apply_patch(
+            self.WRONG_INDENT_CONTEXT, workspace
+        )
+        assert success, message
+
+        result = (workspace / "sum_range.py").read_text(encoding="utf-8")
+        # The change was applied ...
+        assert "range(1, n + 1)" in result
+        # ... and the indentation of the untouched line is intact.
+        assert "        total += i" in result
+        # The result is valid Python.
+        compile(result, "sum_range.py", "exec")
+
+    def test_patch_that_breaks_the_syntax_is_rejected(self, tmp_path: Path):
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        (workspace / "sum_range.py").write_text(self.SOURCE, encoding="utf-8")
+
+        corrupting = (
+            "--- a/sum_range.py\n"
+            "+++ b/sum_range.py\n"
+            "@@ -1,4 +1,4 @@\n"
+            " def sum_range(n):\n"
+            "     total = 0\n"
+            "     for i in range(1, n):  # off by one\n"
+            "-        total += i\n"
+            "+    total += i\n"
+        )
+        applier = PatchApplier()
+        success, message, _ = applier.apply_patch(corrupting, workspace)
+        assert success is False
+        assert "would not compile" in message
+        # The original file is untouched.
+        assert (workspace / "sum_range.py").read_text(encoding="utf-8") == self.SOURCE
+
+
 class TestPatchHash:
     def test_hash_is_stable(self):
         patch = _diff("app.py", "value = 1", "value = 2")

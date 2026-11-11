@@ -93,6 +93,10 @@ def get_config() -> dict:
         "FIXPILOT_ALLOW_FILE_DELETION": _env_bool("FIXPILOT_ALLOW_FILE_DELETION", False),
         # Keep the disposable workspace after a run (useful for debugging).
         "FIXPILOT_KEEP_WORKSPACE": _env_bool("FIXPILOT_KEEP_WORKSPACE", False),
+        # Deliver a verified patch to the ORIGINAL project. Off by default:
+        # the repair is always verified in the disposable workspace first and
+        # the original project is only touched with an explicit approval.
+        "FIXPILOT_APPLY_TO_ORIGINAL": _env_bool("FIXPILOT_APPLY_TO_ORIGINAL", False),
         "FIXPILOT_REPORTS_DIR": os.getenv("FIXPILOT_REPORTS_DIR", "reports"),
         "PROJECT_ROOT": str(PROJECT_ROOT),
         # Multi-language support

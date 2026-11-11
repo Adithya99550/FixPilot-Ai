@@ -130,6 +130,25 @@ class Verifier:
                 "previously_failing_now_passing": list(previously_failing_now_passing),
             }
 
+        # The test suite could not even be executed (collection error, usage
+        # error, internal error, ...). This is NOT a regression: the tests
+        # never ran, so nothing can be compared. It usually means the patch
+        # itself broke the file (for example a wrong indentation).
+        if post_patch_result.exit_code != 1:
+            return {
+                "status": "stop",
+                "failure_kind": "suite_not_executed",
+                "evidence": (
+                    "The test suite could not be executed after the patch "
+                    "(exit code {0}). The patch itself is the likely cause - "
+                    "the tests never ran, so no comparison is possible.".format(
+                        post_patch_result.exit_code
+                    )
+                ),
+                "new_failures": [],
+                "previously_failing_now_passing": [],
+            }
+
         # Decision logic
         if new_failures:
             # Has new failures - check if they're acceptable
@@ -142,6 +161,7 @@ class Verifier:
             if unacceptable_new:
                 return {
                     "status": "regression",
+                    "failure_kind": "new_failures",
                     "evidence": "New failures introduced: {0}. Regression detected - repair introduced new issues.".format(
                         ', '.join(sorted(unacceptable_new))
                     ),
@@ -193,7 +213,8 @@ class Verifier:
         # new evidence to work with, so a bounded retry is worthwhile.
         if previously_failing_now_passing and not new_failures:
             return {
-                "status": "retry",
+                "status": "partial",
+                "failure_kind": "partial_progress",
                 "evidence": (
                     "Partial progress: {0} now pass, {1} still failing. "
                     "No new failures introduced - retrying with updated diagnostics.".format(

@@ -86,7 +86,12 @@ class TestNoFakePatches:
             repairer.generate_patch(plan, {})
         assert "without any actual changes" in str(exc_info.value).lower()
 
-    def test_malformed_hunk_raises(self, plan):
+    def test_broken_hunk_header_is_rescued(self, plan):
+        """A broken header is rebuilt from the hunk body.
+
+        The body is what actually gets applied, so a mangled header must not
+        throw the whole repair away.
+        """
         broken = (
             "--- a/calculator.py\n"
             "+++ b/calculator.py\n"
@@ -95,6 +100,28 @@ class TestNoFakePatches:
             "+new\n"
         )
         repairer = Repairer(llm_provider=FakeLLMProvider([broken]))
+        result = repairer.generate_patch(plan, {})
+        assert "@@" in result.patch
+        assert "-old" in result.patch
+        assert "+new" in result.patch
+
+    def test_truncated_hunk_header_is_rescued(self, plan):
+        truncated = (
+            "--- a/calculator.py\n"
+            "+++ b/calculator.py\n"
+            "@@ -\n"
+            "-old\n"
+            "+new\n"
+        )
+        repairer = Repairer(llm_provider=FakeLLMProvider([truncated]))
+        result = repairer.generate_patch(plan, {})
+        assert result.patch.startswith("--- a/calculator.py")
+        assert "+new" in result.patch
+
+    def test_response_without_any_change_is_rejected(self, plan):
+        """A file section without hunks carries no change at all."""
+        empty = "--- a/calculator.py\n+++ b/calculator.py\n"
+        repairer = Repairer(llm_provider=FakeLLMProvider([empty]))
         with pytest.raises(RepairGenerationError):
             repairer.generate_patch(plan, {})
 

@@ -99,6 +99,16 @@ streamlit run dashboard/app.py
 was not (or the workflow failed), and `2` when the run was blocked because the
 Docker sandbox was unavailable.
 
+## Advanced Options
+
+```bash
+# Apply the verified patch to the original project (requires approval)
+fixpilot run <project-path> --apply-to-original
+
+# Deterministic demo mode (no LLM, scripted provider)
+fixpilot run <project-path> --demo
+```
+
 ## Security
 
 - Target code isolation via Docker sandbox (network disabled, memory/CPU/PIDs limited, non-root user, capabilities dropped)

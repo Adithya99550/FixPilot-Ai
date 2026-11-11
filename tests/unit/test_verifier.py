@@ -76,13 +76,49 @@ class TestSuccessRequiresEvidence:
         assert outcome["status"] == "regression"
         assert "tests/test_calc.py::test_sub" in outcome["new_failures"]
 
-    def test_partial_progress_is_a_retry(self):
+    def test_partial_progress_is_a_partial(self):
         verifier = Verifier()
         outcome = verifier.verify(
             _result(1, TWO_FAILING), _result(1, FAILING), _result(1, TWO_FAILING), CONFIG
         )
-        assert outcome["status"] == "retry"
+        assert outcome["status"] == "partial"
+        assert outcome["failure_kind"] == "partial_progress"
         assert outcome["previously_failing_now_passing"]
+
+    def test_collection_error_is_not_a_regression(self):
+        """A patch that breaks the file makes the suite uncollectable.
+
+        That is a *patch* problem, not a regression: the tests never ran, so
+        there is nothing to compare with the baseline.
+        """
+        verifier = Verifier()
+        collection_error = (
+            "=================================== ERRORS ====================================\n"
+            "__________________ ERROR collecting tests/test_calc.py __________________\n"
+            "E   IndentationError: expected an indented block after 'for' statement\n"
+            "=========================== short test summary info ============================\n"
+            "ERROR tests/test_calc.py\n"
+            "!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n"
+        )
+        outcome = verifier.verify(
+            _result(1, FAILING),
+            _result(2, collection_error),
+            _result(1, FAILING),
+            CONFIG,
+        )
+        assert outcome["status"] == "stop"
+        assert outcome["failure_kind"] == "suite_not_executed"
+        assert outcome["new_failures"] == []
+        assert "could not be executed" in outcome["evidence"].lower()
+
+    def test_usage_error_is_not_a_regression(self):
+        verifier = Verifier()
+        outcome = verifier.verify(
+            _result(1, FAILING), _result(4, "ERROR: file or directory not found"),
+            _result(1, FAILING), CONFIG,
+        )
+        assert outcome["status"] == "stop"
+        assert outcome["failure_kind"] == "suite_not_executed"
 
     def test_no_progress_is_a_stop(self):
         verifier = Verifier()

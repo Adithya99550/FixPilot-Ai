@@ -401,8 +401,34 @@ class TestCancellation:
         assert storage.get_run(result["run_id"])["status"] == "CANCELLED"
 
 
+class TestPatchRegeneration:
+    """A malformed model answer is retried with feedback."""
+
+    def test_malformed_patch_is_regenerated_with_feedback(self, project, tmp_path):
+        broken = "--- a/calculator.py\n+++ b/calculator.py\n"
+        executor = ScriptedExecutor(
+            [_result(exit_code=1), _result(exit_code=0, stdout=PASSING_OUTPUT)]
+        )
+        llm = FakeLLMProvider([INVESTIGATION_JSON, broken, GOOD_PATCH])
+        engine, storage = _engine(tmp_path, executor, llm)
+        result = engine.execute(project, auto_approve=True)
+
+        assert result["status"] == RunStatus.SUCCESS, result.get("reason")
+        # The second prompt told the model what was wrong.
+        repair_prompts = [p for p in llm.prompts if "FixPilot Repairer" in p]
+        assert len(repair_prompts) == 2
+        assert "could not be used" in repair_prompts[1]
+
+    def test_repeated_malformed_patches_fail_the_run(self, project, tmp_path):
+        broken = "--- a/calculator.py\n+++ b/calculator.py\n"
+        executor = ScriptedExecutor([_result(exit_code=1)])
+        llm = FakeLLMProvider([INVESTIGATION_JSON, broken])
+        engine, storage = _engine(tmp_path, executor, llm)
+        result = engine.execute(project, auto_approve=True)
+        assert result["status"] == RunStatus.REPAIR_FAILED
+
+
 class TestContextFallback:
-    """The repairer must never work without any source code."""
 
     def test_empty_plan_falls_back_to_the_diagnostic_files(self, project, tmp_path):
         """An investigation without a hypothesis must not leave the plan empty."""

@@ -131,6 +131,15 @@ def main():
             "untrusted code."
         ),
     )
+    parser_run.add_argument(
+        "--apply-to-original",
+        action="store_true",
+        help=(
+            "Apply the verified patch to the ORIGINAL project (not only the "
+            "disposable workspace). The repair is always verified in the "
+            "workspace first; a backup of the original files is created."
+        ),
+    )
     parser_run.set_defaults(func=cmd_run)
 
     # Audit command - static bug scan (no failing test required)
@@ -206,7 +215,7 @@ def cmd_doctor(args, config):
     except Exception as e:  # pragma: no cover - defensive
         docker_detail = f"check failed: {e}"
 
-    print(f"Docker available: {docker_available} ({docker_detail})")
+    
     if not docker_available:
         print("  [!] Non-Python languages require Docker sandbox images.")
 
@@ -227,19 +236,7 @@ def cmd_doctor(args, config):
     elif not docker_available and unsafe_local:
         print("  [!] UNSAFE: the target code will run directly on this host.")
 
-    print()
-    print("Honest Limitations")
-    print("-" * 40)
-    print("- It cannot fix what isn't tested. No failing test -> it reports 'nothing to repair.'")
-    print("- Passing tests don't guarantee correctness - the fix might be wrong even if tests pass.")
-    print("- LLM diagnosis can be wrong or incomplete.")
-    print("- Non-Python languages need Docker - the sandbox images (fixpilot-sandbox:go,")
-    print("  :node, :rust, :java) are mandatory for Go/Rust/Java/JS.")
-    print("- Human approval may be required before a patch is applied (unless --yes / auto-approve is set).")
-    print()
-    print("In short: FixPilot is a test-driven self-healing agent - it fixes failing tests")
-    print("in Python, JavaScript, TypeScript, Go, Rust, and Java projects, but it needs")
-    print("(a) a failing test to work from and (b) Docker for anything other than Python.")
+
 
 
 def cmd_scan(args, config):
@@ -555,6 +552,9 @@ def cmd_run(args, config):
     if getattr(args, "allow_unsafe_local_execution", False):
         run_config["FIXPILOT_ALLOW_UNSAFE_LOCAL_EXECUTION"] = True
         run_config["FIXPILOT_ALLOW_LOCAL_RUNNER"] = True
+
+    if getattr(args, "apply_to_original", False):
+        run_config["FIXPILOT_APPLY_TO_ORIGINAL"] = True
 
     # Handle GitHub URL
     if _is_github_url(args.path):

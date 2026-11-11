@@ -107,6 +107,14 @@ class RetryManager:
             )
             return False
 
+        # The test suite could not be executed after the patch (for example a
+        # collection error caused by the patch itself). The next attempt gets
+        # that error as fresh evidence, so retrying is worthwhile. This is
+        # checked before the generic "stop" handling below.
+        if attempt_result.get("failure_kind") == "suite_not_executed":
+            logger.info("The test suite could not be executed - retrying")
+            return True
+
         # If status is stop (verification failed), check if we should retry
         if status == "stop":
             # Retry only if there were previously failing tests that now pass
@@ -121,9 +129,9 @@ class RetryManager:
                 logger.info("No new evidence for retry, stopping")
                 return False
 
-        # If status is retry, the repair made partial progress - retry with
+        # If status is partial (the repair made partial progress), retry with
         # the updated diagnostics.
-        if status == "retry":
+        if status in ("partial", "retry"):
             if previously_failing_now_passing:
                 logger.info(
                     f"Retrying: {len(previously_failing_now_passing)} "
