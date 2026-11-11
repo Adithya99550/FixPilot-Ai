@@ -32,13 +32,33 @@ def main():
     parser_doctor.set_defaults(func=cmd_doctor)
 
     # Scan command
-    parser_scan = subparsers.add_parser("scan", help="Scan a Python project")
-    parser_scan.add_argument("path", help="Path to the Python project to scan")
+    parser_scan = subparsers.add_parser("scan", help="Scan a project")
+    parser_scan.add_argument("path", help="Path to the project to scan")
     parser_scan.set_defaults(func=cmd_scan)
+
+    # Clone command
+    parser_clone = subparsers.add_parser("clone", help="Clone a GitHub repository")
+    parser_clone.add_argument("url", help="GitHub repository URL (HTTPS or SSH)")
+    parser_clone.add_argument(
+        "--branch",
+        "-b",
+        help="Branch to checkout",
+    )
+    parser_clone.add_argument(
+        "--commit",
+        "-c",
+        help="Commit SHA to checkout",
+    )
+    parser_clone.add_argument(
+        "--target",
+        "-t",
+        help="Target directory (default: repo name)",
+    )
+    parser_clone.set_defaults(func=cmd_clone)
 
     # Run command
     parser_run = subparsers.add_parser("run", help="Run FixPilot repair workflow")
-    parser_run.add_argument("path", help="Path to the Python project to repair")
+    parser_run.add_argument("path", help="Path to the project to repair (or GitHub URL)")
     parser_run.add_argument(
         "--analysis-only",
         action="store_true",
@@ -49,6 +69,35 @@ def main():
         "-y",
         action="store_true",
         help="Auto-approve patches without interactive prompt",
+    )
+    # Multi-language support
+    parser_run.add_argument(
+        "--language",
+        help="Programming language (python, javascript, typescript, go, rust, java)",
+    )
+    parser_run.add_argument(
+        "--test-framework",
+        help="Test framework (pytest, jest, go test, cargo test, junit)",
+    )
+    parser_run.add_argument(
+        "--test-command",
+        help="Test command to run (overrides auto-detection)",
+    )
+    parser_run.add_argument(
+        "--build-command",
+        help="Build command to run before tests",
+    )
+    parser_run.add_argument(
+        "--repo-url",
+        help="GitHub repository URL",
+    )
+    parser_run.add_argument(
+        "--branch",
+        help="Git branch to checkout",
+    )
+    parser_run.add_argument(
+        "--commit",
+        help="Git commit SHA to checkout",
     )
     parser_run.set_defaults(func=cmd_run)
 
@@ -171,20 +220,118 @@ def cmd_export(args, config):
     print("\n" + report_path.read_text(encoding="utf-8"))
 
 
+def cmd_clone(args, config):
+    """Clone a GitHub repository."""
+    from fixpilot.repository.fetcher import GitHubFetcher, CloneError
+
+    url = args.url
+    branch = args.branch
+    commit = args.commit
+    target = args.target
+
+    print(f"Cloning repository: {url}")
+    if branch:
+        print(f"Branch: {branch}")
+    if commit:
+        print(f"Commit: {commit}")
+
+    try:
+        fetcher = GitHubFetcher(config.get("GITHUB_TOKEN", ""))
+        repo_path = fetcher.clone(url, target=target, branch=branch, commit=commit)
+        print(f"Repository cloned successfully to: {repo_path}")
+    except CloneError as e:
+        print(f"Clone failed: {e}")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+
+
+def _is_github_url(path: str) -> bool:
+    """Check if the path is a GitHub URL."""
+    import re
+    github_patterns = [
+        r"^https://github\.com/[\w-]+/[\w.-]+(\.git)?/?$",
+        r"^git@github\.com:[\w-]+/[\w.-]+(\.git)?$",
+        r"^https://github\.com/[\w-]+/[\w.-]+/tree/[\w/-]+$",
+    ]
+    for pattern in github_patterns:
+        if re.match(pattern, path):
+            return True
+    return False
+
+
+def _load_fixpilot_toml(project_path: Path) -> dict:
+    """Load fixpilot.toml configuration from project root."""
+    import tomllib
+    toml_path = project_path / "fixpilot.toml"
+    if toml_path.exists():
+        try:
+            with open(toml_path, "rb") as f:
+                return tomllib.load(f)
+        except Exception as e:
+            print(f"Warning: Could not parse fixpilot.toml: {e}")
+    return {}
+
+
 def cmd_run(args, config):
     """Run FixPilot repair workflow."""
     project_path = Path(args.path)
 
+    # Merge config with CLI args (CLI args take precedence)
+    run_config = dict(config)
+    run_config.update({
+        "language": getattr(args, "language", "") or config.get("FIXPILOT_LANGUAGE", ""),
+        "test_framework": getattr(args, "test_framework", "") or config.get("FIXPILOT_TEST_FRAMEWORK", ""),
+        "test_command": getattr(args, "test_command", "") or config.get("FIXPILOT_TEST_COMMAND", ""),
+        "build_command": getattr(args, "build_command", "") or config.get("FIXPILOT_BUILD_COMMAND", ""),
+        "repo_url": getattr(args, "repo_url", "") or config.get("FIXPILOT_REPO_URL", ""),
+        "branch": getattr(args, "branch", "") or config.get("FIXPILOT_BRANCH", ""),
+        "commit": getattr(args, "commit", "") or config.get("FIXPILOT_COMMIT", ""),
+    })
+
+    # Handle GitHub URL
+    if _is_github_url(args.path):
+        from fixpilot.repository.fetcher import GitHubFetcher, CloneError
+        print(f"Detected GitHub URL: {args.path}")
+        try:
+            fetcher = GitHubFetcher(config.get("GITHUB_TOKEN", ""))
+            project_path = fetcher.clone(args.path, branch=run_config.get("branch"), commit=run_config.get("commit"))
+            run_config["repo_url"] = args.path
+            run_config["target_path"] = str(project_path)
+            print(f"Cloned to: {project_path}")
+        except CloneError as e:
+            print(f"Clone failed: {e}")
+            return
+        except Exception as e:
+            print(f"Unexpected error during clone: {e}")
+            return
+
     if not project_path.is_dir():
-        print(f"Error: '{args.path}' is not a valid directory.")
+        print(f"Error: '{args.path}' is not a valid directory or GitHub URL.")
         return
+
+    # Load fixpilot.toml if present
+    toml_config = _load_fixpilot_toml(project_path)
+    if toml_config:
+        print(f"Loaded project config from fixpilot.toml")
+        # CLI args take precedence over toml
+        for key, value in toml_config.items():
+            if key not in run_config or not run_config[key]:
+                run_config[key] = value
 
     print("=" * 60)
     print(f"FixPilot AI: Initializing workflow on {project_path.resolve()}")
+    if run_config.get("language"):
+        print(f"Language: {run_config['language']}")
+    if run_config.get("test_framework"):
+        print(f"Test Framework: {run_config['test_framework']}")
+    if run_config.get("test_command"):
+        print(f"Test Command: {run_config['test_command']}")
+    if run_config.get("build_command"):
+        print(f"Build Command: {run_config['build_command']}")
     print("=" * 60)
 
     try:
-        engine = WorkflowEngine(config=config)
+        engine = WorkflowEngine(config=run_config)
         result = engine.execute(
             project_path=project_path,
             analysis_only=args.analysis_only,

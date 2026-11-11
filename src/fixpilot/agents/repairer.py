@@ -102,12 +102,26 @@ class Repairer:
         file_contents: Dict[str, str],
     ) -> str:
         """Prompt the LLM to generate a minimal unified diff patch."""
+        # Get language and test framework from plan
+        language = getattr(plan, 'language', 'python')
+        test_framework = getattr(plan, 'test_framework', '')
+
+        # Language-specific guidance for the LLM
+        lang_guidance = self._get_language_guidance(language, test_framework)
+
         prompt = (
             "You are FixPilot Repairer, an expert autonomous debugging agent.\n"
             "Generate a minimal, precise unified diff patch that repairs the failure without refactoring or modifying unrelated code.\n\n"
             f"GOAL: {plan.goal}\n"
             f"ROOT CAUSE: {plan.root_cause}\n"
-            f"STEPS:\n" + "\n".join(f"- {s}" for s in plan.steps) + "\n\n"
+            f"LANGUAGE: {language}"
+        )
+
+        if test_framework:
+            prompt += f"\nTEST FRAMEWORK: {test_framework}"
+
+        prompt += (
+            f"\nSTEPS:\n" + "\n".join(f"- {s}" for s in plan.steps) + "\n\n"
             f"FILES TO CHANGE: {', '.join(plan.files_to_change)}\n"
             f"FILES NOT TO CHANGE: {', '.join(plan.files_not_to_change)}\n\n"
             "SOURCE FILES:\n"
@@ -123,12 +137,75 @@ class Repairer:
             "3. Make the minimal necessary change to fix the failing tests.\n"
         )
 
+        if lang_guidance:
+            prompt += f"\n{lang_guidance}\n"
+
         raw = self.llm_provider.generate(prompt)
 
         # Clean markdown code blocks if the LLM wrapped it
         clean = re.sub(r"^```(?:diff)?\s*", "", raw.strip(), flags=re.MULTILINE)
         clean = re.sub(r"\s*```$", "", clean.strip(), flags=re.MULTILINE)
         return clean.strip()
+
+    def _get_language_guidance(self, language: str, test_framework: str) -> str:
+        """Get language-specific guidance for patch generation."""
+        guidance = {
+            "python": (
+                "LANGUAGE-SPECIFIC GUIDANCE (Python):\n"
+                "- Use 4-space indentation, not tabs\n"
+                "- Follow PEP 8 style conventions\n"
+                "- Prefer explicit over implicit (e.g., `is not None` vs truthiness)\n"
+                "- Use type hints where appropriate\n"
+                "- Don't change function signatures unless necessary\n"
+                "- Handle exceptions specifically, not bare `except:`"
+            ),
+            "javascript": (
+                "LANGUAGE-SPECIFIC GUIDANCE (JavaScript):\n"
+                "- Use 2-space indentation\n"
+                "- Prefer `const`/`let` over `var`\n"
+                "- Use strict equality (`===`) unless coercion is intentional\n"
+                "- Handle async/await properly\n"
+                "- Don't modify prototype chains\n"
+                "- Preserve module.exports/exports patterns"
+            ),
+            "typescript": (
+                "LANGUAGE-SPECIFIC GUIDANCE (TypeScript):\n"
+                "- Use 2-space indentation\n"
+                "- Maintain type safety - don't use `any` unless necessary\n"
+                "- Preserve interface contracts\n"
+                "- Handle generics properly\n"
+                "- Don't remove type annotations without reason\n"
+                "- Use `readonly` where appropriate"
+            ),
+            "go": (
+                "LANGUAGE-SPECIFIC GUIDANCE (Go):\n"
+                "- Use tabs for indentation (gofmt standard)\n"
+                "- Follow Go naming conventions (CamelCase for exported, camelCase for unexported)\n"
+                "- Handle errors explicitly, don't ignore them\n"
+                "- Use `:=` for short declarations inside functions\n"
+                "- Don't change public API signatures unless necessary\n"
+                "- Prefer `errors.Is`/`errors.As` for error checking"
+            ),
+            "rust": (
+                "LANGUAGE-SPECIFIC GUIDANCE (Rust):\n"
+                "- Use 4-space indentation\n"
+                "- Follow Rust naming conventions (snake_case for functions/variables, PascalCase for types)\n"
+                "- Use `?` operator for error propagation\n"
+                "- Don't use `unwrap()` or `expect()` in production code unless panicking is intended\n"
+                "- Preserve ownership/borrowing semantics\n"
+                "- Use `Option`/`Result` properly"
+            ),
+            "java": (
+                "LANGUAGE-SPECIFIC GUIDANCE (Java):\n"
+                "- Use 4-space indentation\n"
+                "- Follow Java naming conventions (PascalCase for classes, camelCase for methods/fields)\n"
+                "- Handle checked exceptions properly\n"
+                "- Don't change public method signatures unless necessary\n"
+                "- Use try-with-resources for AutoCloseable\n"
+                "- Prefer standard library over third-party where possible"
+            ),
+        }
+        return guidance.get(language, "")
 
     def _generate_reasoning_summary(self, plan: RepairPlan) -> str:
         """Generate a brief evidence-based reasoning summary."""
@@ -143,6 +220,10 @@ class Repairer:
         if plan.regression_risks:
             risk_count = len(plan.regression_risks)
             parts.append(f"{risk_count} regression risk(s) identified")
+
+        # Add language info
+        language = getattr(plan, 'language', 'python')
+        parts.append(f"Language: {language}")
 
         return " | ".join(parts) if parts else "Repair plan generated"
 
@@ -160,5 +241,18 @@ class Repairer:
             assumptions.append(
                 f"Files {', '.join(plan.files_not_to_change[:3])} remain unchanged"
             )
+
+        # Language-specific assumptions
+        language = getattr(plan, 'language', 'python')
+        if language == "python":
+            assumptions.append("Python syntax and type hints preserved")
+        elif language in ("javascript", "typescript"):
+            assumptions.append("Module exports and async patterns preserved")
+        elif language == "go":
+            assumptions.append("Go error handling patterns preserved")
+        elif language == "rust":
+            assumptions.append("Rust ownership/borrowing semantics preserved")
+        elif language == "java":
+            assumptions.append("Java checked exceptions and public API preserved")
 
         return assumptions

@@ -10,11 +10,67 @@ Responsibilities:
 
 import re
 from pathlib import Path
+from typing import List
+
 from fixpilot.schemas.diagnostics import DiagnosticEvidence
+from fixpilot.diagnostics.base import DiagnosticParser, PARSER_REGISTRY
 
 
-def parse_pytest_output(output: str, stderr: str = "") -> list:
-    """Parse pytest output and extract failure information.
+class PytestParser(DiagnosticParser):
+    """Parser for pytest output."""
+
+    @property
+    def language(self) -> str:
+        return "python"
+
+    @property
+    def test_framework(self) -> str:
+        return "pytest"
+
+    def parse(self, output: str, stderr: str = "") -> List[DiagnosticEvidence]:
+        """Parse pytest output and extract failure information.
+
+        Args:
+            output: pytest stdout output
+            stderr: pytest stderr output
+
+        Returns:
+            List of DiagnosticEvidence objects, one per failing test
+        """
+        failures = []
+
+        # Combine output and stderr for analysis
+        full_output = output + "\n" + stderr
+
+        # Find failing test names from pytest summary lines
+        failing_tests = _extract_failing_test_names(full_output)
+
+        # For each failing test, try to extract detailed evidence
+        for test_name in failing_tests:
+            evidence = _extract_test_evidence(test_name, full_output)
+            if evidence:
+                failures.append(evidence)
+
+        # If no explicitly failing tests found, check for any test references
+        if not failures:
+            # Try to find test names in the output
+            test_name_pattern = re.compile(r'(test_\w+)', re.IGNORECASE)
+            for line in full_output.split("\n"):
+                matches = test_name_pattern.findall(line)
+                for match in matches:
+                    test_name = match[0] if isinstance(match, tuple) else match
+                    if len(test_name) > 3 and test_name.startswith("test_"):
+                        evidence = _extract_test_evidence(test_name, full_output)
+                        if evidence and evidence not in failures:
+                            failures.append(evidence)
+                        if len(failures) >= 10:
+                            return failures
+
+        return failures
+
+
+def parse_pytest_output(output: str, stderr: str = "") -> List[DiagnosticEvidence]:
+    """Parse pytest output and extract failure information (legacy function).
 
     Args:
         output: pytest stdout output
@@ -23,36 +79,8 @@ def parse_pytest_output(output: str, stderr: str = "") -> list:
     Returns:
         List of DiagnosticEvidence objects, one per failing test
     """
-    failures = []
-
-    # Combine output and stderr for analysis
-    full_output = output + "\n" + stderr
-
-    # Find failing test names from pytest summary lines
-    failing_tests = _extract_failing_test_names(full_output)
-
-    # For each failing test, try to extract detailed evidence
-    for test_name in failing_tests:
-        evidence = _extract_test_evidence(test_name, full_output)
-        if evidence:
-            failures.append(evidence)
-
-    # If no explicitly failing tests found, check for any test references
-    if not failures:
-        # Try to find test names in the output
-        test_name_pattern = re.compile(r'(test_\w+)', re.IGNORECASE)
-        for line in full_output.split("\n"):
-            matches = test_name_pattern.findall(line)
-            for match in matches:
-                test_name = match[0] if isinstance(match, tuple) else match
-                if len(test_name) > 3 and test_name.startswith("test_"):
-                    evidence = _extract_test_evidence(test_name, full_output)
-                    if evidence and evidence not in failures:
-                        failures.append(evidence)
-                    if len(failures) >= 10:
-                        return failures
-
-    return failures
+    parser = PytestParser()
+    return parser.parse(output, stderr)
 
 
 def _extract_failing_test_names(full_output: str) -> list:
@@ -86,7 +114,7 @@ def _extract_failing_test_names(full_output: str) -> list:
     return list(test_names)
 
 
-def _extract_test_evidence(test_name: str, full_output: str) -> dict:
+def _extract_test_evidence(test_name: str, full_output: str):
     """Extract evidence for a specific failing test.
 
     Args:
@@ -94,7 +122,7 @@ def _extract_test_evidence(test_name: str, full_output: str) -> dict:
         full_output: Complete pytest output
 
     Returns:
-        Dict with test failure information or None
+        DiagnosticEvidence or None
     """
     # Find the line number where this test was mentioned
     test_line_idx = None
@@ -157,6 +185,8 @@ def _extract_test_evidence(test_name: str, full_output: str) -> dict:
         line_range=line_range,
         snippet=redacted_snippet,
         redacting=bool(snippet or exception_message),
+        language="python",
+        test_framework="pytest",
     )
 
     return evidence
@@ -236,3 +266,7 @@ def _detect_test_command(full_output: str, config: dict) -> str:
 
     # Default
     return "python -m pytest -q"
+
+
+# Register the parser
+PARSER_REGISTRY.register(PytestParser())

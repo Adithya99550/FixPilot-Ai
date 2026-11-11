@@ -14,3 +14,6 @@ class DiagnosticEvidence(BaseModel):
     line_range: tuple = Field(default=(0, 0), description="Line range of failure")
     snippet: str = Field(default="", description="Relevant code snippet")
     redacting: bool = Field(default=False, description="Whether sensitive data was redacted")
+    # Multi-language support
+    language: str = Field(default="", description="Programming language")
+    test_framework: str = Field(default="", description="Test framework")

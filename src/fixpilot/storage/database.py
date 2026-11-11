@@ -70,7 +70,15 @@ class Database:
                 retry_count INTEGER,
                 model_name TEXT,
                 report_path TEXT,
-                error_summary TEXT
+                error_summary TEXT,
+                -- Multi-language support
+                language TEXT,
+                test_framework TEXT,
+                test_command TEXT,
+                build_command TEXT,
+                repo_url TEXT,
+                branch TEXT,
+                "commit" TEXT
             )
         """)
 
@@ -123,8 +131,10 @@ class Database:
                 """
                 INSERT INTO runs (
                     run_id, target_display_path, started_at, status, mode,
-                    model_name, error_summary
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    model_name, error_summary,
+                    language, test_framework, test_command, build_command,
+                    repo_url, branch, "commit"
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -134,6 +144,13 @@ class Database:
                     config.get("mode", "safe"),
                     config.get("FIXPILOT_MODEL", ""),
                     "",
+                    config.get("language", config.get("FIXPILOT_LANGUAGE", "")),
+                    config.get("test_framework", config.get("FIXPILOT_TEST_FRAMEWORK", "")),
+                    config.get("test_command", config.get("FIXPILOT_TEST_COMMAND", "")),
+                    config.get("build_command", config.get("FIXPILOT_BUILD_COMMAND", "")),
+                    config.get("repo_url", config.get("FIXPILOT_REPO_URL", "")),
+                    config.get("branch", config.get("FIXPILOT_BRANCH", "")),
+                    config.get("commit", config.get("FIXPILOT_COMMIT", "")),
                 ),
             )
             self._conn.commit()

@@ -1,0 +1,16 @@
+# FixPilot Sandbox Dockerfile - Rust
+# Provides isolated non-root test execution environment for Rust projects
+
+FROM rust:1.78-slim
+
+# Create non-root user
+RUN groupadd -r nonroot && useradd -r -g nonroot -m -d /home/nonroot nonroot
+
+# Create working directory
+WORKDIR /project
+
+# Switch to non-root user
+USER nonroot
+
+# Default entrypoint
+CMD ["cargo", "test"]

@@ -1,0 +1,19 @@
+# FixPilot Sandbox Dockerfile - Python
+# Provides isolated non-root test execution environment for Python projects
+
+FROM python:3.12-slim
+
+# Create non-root user
+RUN groupadd -r nonroot && useradd -r -g nonroot -m -d /home/nonroot nonroot
+
+# Install test dependencies
+RUN pip install --no-cache-dir pytest pytest-mock pytest-cov pytest-xdist
+
+# Create working directory
+WORKDIR /project
+
+# Switch to non-root user
+USER nonroot
+
+# Default entrypoint
+CMD ["python", "-m", "pytest", "-q"]

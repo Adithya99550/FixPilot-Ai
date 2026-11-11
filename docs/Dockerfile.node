@@ -1,0 +1,19 @@
+# FixPilot Sandbox Dockerfile - Node.js
+# Provides isolated non-root test execution environment for Node.js projects
+
+FROM node:20-slim
+
+# Create non-root user
+RUN groupadd -r nonroot && useradd -r -g nonroot -m -d /home/nonroot nonroot
+
+# Install common test tools globally
+RUN npm install -g jest @types/jest ts-jest
+
+# Create working directory
+WORKDIR /project
+
+# Switch to non-root user
+USER nonroot
+
+# Default entrypoint - expects package.json with test script
+CMD ["npm", "test"]

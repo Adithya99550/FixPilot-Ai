@@ -15,9 +15,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fixpilot.schemas.execution import ExecutionResult
 from fixpilot.schemas.state import FixPilotState
-from fixpilot.diagnostics.pytest_parser import parse_pytest_output
+from fixpilot.diagnostics import PARSER_REGISTRY
 
-logger = logging.getLogger("fixpalot.verifier")
+logger = logging.getLogger("fixpilot.verifier")
 
 
 class VerificationError(Exception):
@@ -27,6 +27,25 @@ class VerificationError(Exception):
 
 class Verifier:
     """Verifier agent that compares test results before and after patch application."""
+
+    def _get_parser(self, config: Dict[str, Any]):
+        """Get the appropriate diagnostic parser for the language/framework."""
+        language = config.get("language", config.get("FIXPILOT_LANGUAGE", "python"))
+        test_framework = config.get("test_framework", config.get("FIXPILOT_TEST_FRAMEWORK", ""))
+
+        if language and test_framework:
+            parser = PARSER_REGISTRY.get_parser(language, test_framework)
+            if parser:
+                return parser
+
+        # Fallback to pytest parser
+        from fixpilot.diagnostics.pytest_parser import PytestParser
+        return PytestParser()
+
+    def _parse_failures(self, stdout: str, stderr: str, config: Dict[str, Any]):
+        """Parse test failures using the appropriate parser."""
+        parser = self._get_parser(config)
+        return parser.parse(stdout, stderr)
 
     def verify(
         self,
@@ -77,11 +96,11 @@ class Verifier:
                 "previously_failing_now_passing": [],
             }
 
-        # Parse test results
-        pre_failures = parse_pytest_output(pre_patch_result.stdout, pre_patch_result.stderr)
-        post_failures = parse_pytest_output(post_patch_result.stdout, post_patch_result.stderr)
-        baseline_failures = parse_pytest_output(
-            baseline_result.stdout, baseline_result.stderr
+        # Parse test results using appropriate parser
+        pre_failures = self._parse_failures(pre_patch_result.stdout, pre_patch_result.stderr, config)
+        post_failures = self._parse_failures(post_patch_result.stdout, post_patch_result.stderr, config)
+        baseline_failures = self._parse_failures(
+            baseline_result.stdout, baseline_result.stderr, config
         )
 
         # Get sets of test names

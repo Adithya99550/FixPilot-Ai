@@ -41,5 +41,16 @@ artifacts/
 # Docker
 Dockerfile.sandbox
 
+# Node / JS dependencies
+node_modules/
+**/node_modules/
+package-lock.json
+
+# Java / Maven build artifacts
+target/
+**/target/
+*.class
+
 # FixPilot specific
 .fixpilot/
+reports/

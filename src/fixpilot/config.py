@@ -25,4 +25,13 @@ def get_config():
         "FIXPILOT_ANALYSIS_ONLY": os.getenv("FIXPILOT_ANALYSIS_ONLY", "false").lower() == "true",
         "FIXPILOT_REPORTS_DIR": os.getenv("FIXPILOT_REPORTS_DIR", "reports"),
         "PROJECT_ROOT": str(PROJECT_ROOT),
+        # Multi-language support
+        "FIXPILOT_LANGUAGE": os.getenv("FIXPILOT_LANGUAGE", ""),
+        "FIXPILOT_TEST_FRAMEWORK": os.getenv("FIXPILOT_TEST_FRAMEWORK", ""),
+        "FIXPILOT_TEST_COMMAND": os.getenv("FIXPILOT_TEST_COMMAND", ""),
+        "FIXPILOT_BUILD_COMMAND": os.getenv("FIXPILOT_BUILD_COMMAND", ""),
+        "FIXPILOT_REPO_URL": os.getenv("FIXPILOT_REPO_URL", ""),
+        "FIXPILOT_BRANCH": os.getenv("FIXPILOT_BRANCH", ""),
+        "FIXPILOT_COMMIT": os.getenv("FIXPILOT_COMMIT", ""),
+        "GITHUB_TOKEN": os.getenv("GITHUB_TOKEN", ""),
     }

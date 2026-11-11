@@ -14,9 +14,7 @@ from typing import Any, Dict, List, Optional
 from fixpilot.config import get_config
 from fixpilot.scanner.project_scanner import scan_project
 from fixpilot.sandbox.docker_executor import DockerExecutor, DockerUnavailableError
-from fixpilot.diagnostics.pytest_parser import parse_pytest_output
-from fixpilot.diagnostics.traceback_parser import parse_traceback
-from fixpilot.diagnostics.redaction import redact_sensitive_data
+from fixpilot.diagnostics import parse_pytest_output, parse_traceback, redact_sensitive_data, PARSER_REGISTRY
 from fixpilot.llm.provider import BaseLLMProvider, GeminiProvider
 from fixpilot.agents.investigator import Investigator
 from fixpilot.agents.planner import Planner
@@ -27,19 +25,68 @@ from fixpilot.patching.validator import PatchApplier, PatchValidationError
 from fixpilot.storage.database import Storage
 from fixpilot.schemas.execution import ExecutionResult
 from fixpilot.reporting.markdown_report import generate_markdown_report
+from fixpilot.languages import detect_language, detect_test_framework, get_language_config
 
 
 class LocalExecutor:
-    """Local pytest executor for development or fallback environments."""
+    """Local test executor for development or fallback environments."""
 
     def __init__(self, config: Dict[str, Any] = None):
         self.config = config or {}
         self.timeout_seconds = self.config.get("FIXPILOT_TIMEOUT_SECONDS", 120)
 
-    def run_tests(self, test_command: List[str], workspace_path: Path) -> ExecutionResult:
+    def run_tests(
+        self,
+        test_command: List[str],
+        workspace_path: Path,
+        language: str = None,
+        build_command: List[str] = None,
+    ) -> ExecutionResult:
         import subprocess
         import time
 
+        # Run build command first if provided
+        if build_command:
+            start_time = time.time()
+            try:
+                build_result = subprocess.run(
+                    build_command,
+                    cwd=str(workspace_path),
+                    capture_output=True,
+                    timeout=self.timeout_seconds,
+                )
+                build_duration = round(time.time() - start_time, 3)
+                if build_result.returncode != 0:
+                    return ExecutionResult(
+                        exit_code=build_result.returncode,
+                        stdout=build_result.stdout.decode("utf-8", errors="replace"),
+                        stderr=build_result.stderr.decode("utf-8", errors="replace"),
+                        timed_out=False,
+                        duration=build_duration,
+                        sandbox_id="local",
+                    )
+            except subprocess.TimeoutExpired:
+                build_duration = round(time.time() - start_time, 3)
+                return ExecutionResult(
+                    exit_code=-1,
+                    stdout="",
+                    stderr=f"Build timed out after {self.timeout_seconds}s",
+                    timed_out=True,
+                    duration=build_duration,
+                    sandbox_id="local",
+                )
+            except Exception as e:
+                build_duration = round(time.time() - start_time, 3)
+                return ExecutionResult(
+                    exit_code=-1,
+                    stdout="",
+                    stderr=str(e),
+                    timed_out=False,
+                    duration=build_duration,
+                    sandbox_id="local",
+                )
+
+        # Run the test command
         cmd = test_command if test_command else ["python", "-m", "pytest", "-q"]
         start_time = time.time()
         try:
@@ -95,7 +142,7 @@ class WorkflowEngine:
             self.config.get("FIXPILOT_DB_PATH", "artifacts/fixpilot.sqlite3"),
             reports_dir=self.config.get("FIXPILOT_REPORTS_DIR", "reports"),
         )
-        
+
         # LLM Provider setup
         if llm_provider:
             self.llm_provider = llm_provider
@@ -159,11 +206,65 @@ class WorkflowEngine:
         auto_approve: bool,
     ) -> Dict[str, Any]:
         print(f"\n[1/5] Scanning project: {project_path}")
-        scan_info = scan_project(workspace_path, self.config)
-        test_cmd = self.config.get("test_command", ["python", "-m", "pytest", "-q"])
 
-        print("\n[2/5] Running baseline tests...")
-        baseline_result = self.executor.run_tests(test_cmd, workspace_path)
+        # Detect language and test framework
+        language = self.config.get("language") or self.config.get("FIXPILOT_LANGUAGE", "")
+        test_framework = self.config.get("test_framework") or self.config.get("FIXPILOT_TEST_FRAMEWORK", "")
+        test_command = self.config.get("test_command") or self.config.get("FIXPILOT_TEST_COMMAND", "")
+        build_command = self.config.get("build_command") or self.config.get("FIXPILOT_BUILD_COMMAND", "")
+
+        if not language:
+            language = detect_language(workspace_path)
+            print(f"Detected language: {language}")
+
+        if not test_framework and language:
+            test_framework = detect_test_framework(workspace_path, language)
+            print(f"Detected test framework: {test_framework}")
+
+        # Get language config
+        lang_config = get_language_config(language) if language else None
+
+        # Determine test command
+        if test_command:
+            test_cmd = test_command.split()
+        elif lang_config:
+            test_cmd = lang_config.get_test_command(test_framework, test_command)
+        else:
+            test_cmd = ["python", "-m", "pytest", "-q"]
+
+        # Determine build command
+        build_cmd = None
+        if build_command:
+            build_cmd = build_command.split() if isinstance(build_command, str) else list(build_command)
+        elif lang_config and lang_config.build_commands:
+            build_cmd = lang_config.get_build_command()
+
+        # Update config for storage
+        self.config["language"] = language
+        self.config["test_framework"] = test_framework
+        self.config["test_command"] = " ".join(test_cmd)
+        if build_cmd:
+            self.config["build_command"] = " ".join(build_cmd)
+
+        scan_info = scan_project(workspace_path, self.config)
+
+        # Run build command if available (via executor)
+        if build_cmd:
+            print(f"\n[2/6] Running build command: {' '.join(build_cmd)}")
+            build_result = self.executor.run_tests(
+                build_cmd, workspace_path, language=language, build_command=None
+            )
+            if build_result.timed_out:
+                print("ERROR: Build timed out.")
+                self.storage.complete_run(run_id, "FAILED", build_result.exit_code, "Build timed out")
+                self.storage.save_report(run_id)
+                return {"run_id": run_id, "status": "FAILED", "reason": "Build timed out"}
+            if build_result.exit_code != 0:
+                print(f"Build failed with exit code: {build_result.exit_code}")
+                print(f"Build stderr: {build_result.stderr[:500]}")
+
+        print("\n[3/6] Running baseline tests...")
+        baseline_result = self.executor.run_tests(test_cmd, workspace_path, language=language)
 
         if baseline_result.timed_out:
             print("ERROR: Baseline tests timed out.")
@@ -180,18 +281,55 @@ class WorkflowEngine:
         print(f"Detected test failures (exit code: {baseline_result.exit_code})")
 
         # Diagnostics & Investigation
-        print("\n[3/5] Extracting diagnostics & investigating root cause...")
-        diagnostics = {
-            "test_output": baseline_result.stdout,
-            "stderr": baseline_result.stderr,
-            "traceback": baseline_result.stderr or baseline_result.stdout,
-            "failing_test": "pytest_suite",
-        }
+        print("\n[4/6] Extracting diagnostics & investigating root cause...")
+
+        # Select appropriate diagnostic parser
+        parser = None
+        if language and test_framework:
+            parser = PARSER_REGISTRY.get_parser(language, test_framework)
+
+        if parser:
+            failures = parser.parse(baseline_result.stdout, baseline_result.stderr)
+            if failures:
+                failing_test = failures[0].failing_test
+                diagnostics = {
+                    "test_output": baseline_result.stdout,
+                    "stderr": baseline_result.stderr,
+                    "traceback": failures[0].traceback,
+                    "failing_test": failing_test,
+                    "parsed_failures": failures,
+                }
+            else:
+                diagnostics = {
+                    "test_output": baseline_result.stdout,
+                    "stderr": baseline_result.stderr,
+                    "traceback": baseline_result.stderr or baseline_result.stdout,
+                    "failing_test": "unknown",
+                }
+        else:
+            # Fallback to pytest parser
+            failures = parse_pytest_output(baseline_result.stdout, baseline_result.stderr)
+            if failures:
+                failing_test = failures[0].failing_test
+                diagnostics = {
+                    "test_output": baseline_result.stdout,
+                    "stderr": baseline_result.stderr,
+                    "traceback": failures[0].traceback,
+                    "failing_test": failing_test,
+                    "parsed_failures": failures,
+                }
+            else:
+                diagnostics = {
+                    "test_output": baseline_result.stdout,
+                    "stderr": baseline_result.stderr,
+                    "traceback": baseline_result.stderr or baseline_result.stdout,
+                    "failing_test": "pytest_suite",
+                }
 
         investigator = Investigator(self.llm_provider)
         investigation = investigator.investigate(
             diagnostics=diagnostics,
-            project_metadata={"path": str(workspace_path), "scan": scan_info},
+            project_metadata={"path": str(workspace_path), "scan": scan_info, "language": language},
             config=self.config,
         )
 
@@ -206,14 +344,18 @@ class WorkflowEngine:
             return {"run_id": run_id, "status": "SUCCESS", "investigation": investigation}
 
         # Planning
-        print("\n[4/5] Creating repair plan...")
+        print("\n[5/6] Creating repair plan...")
         planner = Planner()
-        plan = planner.create_plan(investigation, self.config)
+        plan = planner.create_plan(investigation, self.config, workspace_path=workspace_path)
+        # Add language context to plan
+        if hasattr(plan, 'language'):
+            plan.language = language
+            plan.test_framework = test_framework
         print(f"Plan goal: {plan.goal}")
         print(f"Files to modify: {', '.join(plan.files_to_change) if plan.files_to_change else 'None specified'}")
 
         # Repair & Verification Loop
-        print("\n[5/5] Executing repair and verification loop...")
+        print("\n[6/6] Executing repair and verification loop...")
         repairer = Repairer(llm_provider=self.llm_provider)
         verifier = Verifier()
         retry_manager = RetryManager(self.config, workspace_path=workspace_path)
@@ -269,7 +411,7 @@ class WorkflowEngine:
                 continue
 
             # Run post-patch tests
-            post_result = self.executor.run_tests(test_cmd, workspace_path)
+            post_result = self.executor.run_tests(test_cmd, workspace_path, language=language)
             verification = verifier.verify(current_pre_result, post_result, baseline_result, self.config)
             v_status = verification.get("status", "stop")
             print(f"Verification result: {v_status.upper()} - {verification.get('evidence', '')}")

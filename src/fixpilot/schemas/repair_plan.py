@@ -39,3 +39,6 @@ class RepairPlan(BaseModel):
     approval_summary: str = Field(
         default="", description="Approval summary"
     )
+    # Multi-language support
+    language: str = Field(default="", description="Programming language")
+    test_framework: str = Field(default="", description="Test framework")
