@@ -85,6 +85,18 @@ def main():
         if st.button("🔄 Refresh Data", use_container_width=True):
             st.rerun()
 
+        st.markdown("---")
+        with st.expander("⚠️ Honest Limitations"):
+            st.markdown("""
+- **It cannot fix what isn't tested.** No failing test → it reports "nothing to repair."
+- **Passing tests don't guarantee correctness** — the fix might be wrong even if tests pass.
+- **LLM diagnosis can be wrong or incomplete.**
+- **Non-Python languages need Docker** — the sandbox images are mandatory for Go/Rust/Java/JS.
+- **Human approval may be required** before a patch is applied (unless `--yes` / auto-approve is set).
+
+> **In short:** FixPilot is a **test-driven self-healing agent** — it needs a failing test to work from, and Docker for non-Python languages.
+""")
+
     # Render Active Page
     if st.session_state.nav_page == "Home":
         render_home()
