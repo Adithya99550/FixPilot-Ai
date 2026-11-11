@@ -15,7 +15,7 @@ def sum_range(n):
         The sum of integers from 1 to n
     """
     total = 0
-    for i in range(1, n):  # Bug: should be range(1, n+1) to include n
+    for i in range(1, n + 1):  # Bug: should be range(1, n+1) to include n
         total += i
     return total
 
