@@ -62,15 +62,38 @@ See [WORKFLOW_DOCUMENTATION.md](WORKFLOW_DOCUMENTATION.md) for the full componen
 
 ## CLI Usage
 
+The full command set is:
+
+| Command | Purpose |
+|---------|---------|
+| `fixpilot version` | Print the FixPilot version |
+| `fixpilot doctor` | Check environment, config and sandbox policy |
+| `fixpilot scan <path>` | Detect the language, test framework and test files |
+| `fixpilot clone <url>` | Clone a GitHub repository |
+| `fixpilot run <path-or-url>` | Run the full repair workflow |
+| `fixpilot audit <path>` | Static bug scan (no failing test required) |
+| `fixpilot review <path>` | Code quality and architecture review |
+| `fixpilot history` | List recorded runs |
+| `fixpilot show <run-id>` | Show the details of one run |
+| `fixpilot export <run-id>` | Export a run report as Markdown |
+
+> **Note:** there is **no `fixpilot report` command** — it does not exist and
+> will fail with `invalid choice: 'report'`. The report command is
+> **`fixpilot export <run-id>`**, which writes the Markdown report to
+> `reports/fixpilot_report_<run-id>.md` and prints it to the terminal.
+
 ```bash
 # Environment & System Doctor
 fixpilot doctor
+
+# Version
+fixpilot version
 
 # Scan a project
 fixpilot scan <project-path>
 
 # Clone a GitHub repository
-fixpilot clone <github-url> [--branch <branch>] [--commit <commit>] [--force]
+fixpilot clone <github-url> [--branch <branch>] [--commit <commit>] [--target <dir>] [--force]
 
 # Run repair workflow
 fixpilot run <project-path-or-github-url>
@@ -79,6 +102,11 @@ fixpilot run <project-path> --yes
 
 # Specify language or commands manually if needed
 fixpilot run <project-path> --language go --test-framework "go test"
+fixpilot run <project-path> --test-command "pytest -q"
+fixpilot run <project-path> --build-command "npm run build"
+
+# Clone options that `run` also accepts
+fixpilot run <path> --repo-url <github-url> [--branch <branch>] [--commit <commit>]
 
 # Static bug scan (does not require a failing test)
 fixpilot audit <project-path>
@@ -89,15 +117,21 @@ fixpilot review <project-path>
 # Run history & details
 fixpilot history
 fixpilot show <run-id>
+
+# Export the Markdown report for a run
+fixpilot export <run-id>
 fixpilot export <run-id> --format markdown
 
 # Dashboard
 streamlit run dashboard/app.py
 ```
 
-`fixpilot run` exits with code `0` when the repair was verified, `1` when it
-was not (or the workflow failed), and `2` when the run was blocked because the
-Docker sandbox was unavailable.
+### Exit codes
+
+| Command | `0` | `1` | `2` |
+|---------|-----|-----|-----|
+| `fixpilot run` | Repair verified, or no tests to repair | Repair not verified / workflow failed | Run blocked because the Docker sandbox was unavailable |
+| `fixpilot export` | Report exported | Run ID not found or report could not be generated | Unsupported export format |
 
 ## Advanced Options
 
@@ -105,9 +139,15 @@ Docker sandbox was unavailable.
 # Apply the verified patch to the original project (requires approval)
 fixpilot run <project-path> --apply-to-original
 
-# Deterministic demo mode (no LLM, scripted provider)
-fixpilot run <project-path> --demo
+# Override the test/build commands instead of relying on auto-detection
+fixpilot run <project-path> --test-command "pytest -q" --build-command "make build"
+
+# Unsafe: run the target project on the host when Docker is unavailable
+fixpilot run <project-path> --allow-unsafe-local-execution
 ```
+
+> **Note:** there is no `fixpilot run --demo` flag. The workflow always uses the
+> configured Gemini provider (`GEMINI_API_KEY` + `FIXPILOT_MODEL`).
 
 ## Security
 

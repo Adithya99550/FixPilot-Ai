@@ -12,13 +12,49 @@ All security relevant switches default to the *safe* value. In particular:
 
 import os
 from pathlib import Path
-from dotenv import load_dotenv
+from typing import Optional
+
+from dotenv import dotenv_values, load_dotenv
 
 # Load .env file from project root
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 ENV_PATH = PROJECT_ROOT / ".env"
 if ENV_PATH.exists():
     load_dotenv(ENV_PATH)
+
+#: Switches for which an explicit *disable* in the project's ``.env`` file
+#: must win over an inherited OS environment variable.
+#:
+#: ``load_dotenv`` does not overwrite variables that already exist in the
+#: process environment. A stale shell variable (for example
+#: ``FIXPILOT_ALLOW_UNSAFE_LOCAL_EXECUTION=true`` left over in a terminal
+#: session) would therefore silently defeat the project's own configuration -
+#: and for a fail-safe switch that is the dangerous direction. These switches
+#: are therefore resolved "fail closed": an explicit ``false`` in ``.env``
+#: always disables the behaviour, and it can never be re-enabled by an
+#: inherited environment variable.
+_FAIL_CLOSED_SWITCHES = (
+    "FIXPILOT_ALLOW_UNSAFE_LOCAL_EXECUTION",
+    "FIXPILOT_ALLOW_LOCAL_RUNNER",
+)
+
+_TRUTHY = ("true", "1", "yes", "on")
+
+
+def _dotenv_raw(name: str) -> Optional[str]:
+    """Return the raw value of ``name`` as written in the project's ``.env``.
+
+    Returns ``None`` when the file or the key does not exist, so the caller
+    can distinguish "not configured" from "configured as empty".
+    """
+    if not ENV_PATH.exists():
+        return None
+    try:
+        values = dotenv_values(ENV_PATH)
+    except OSError:
+        return None
+    raw = values.get(name)
+    return raw if raw is not None else None
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -34,7 +70,30 @@ def _env_bool(name: str, default: bool = False) -> bool:
         # matters for fail-safe defaults such as the approval gate: a blank
         # "FIXPILOT_APPROVAL_REQUIRED=" must not silently disable it.
         return default
-    return raw.strip().lower() in ("true", "1", "yes", "on")
+    return raw.strip().lower() in _TRUTHY
+
+
+def _env_bool_fail_closed(name: str, default: bool = False) -> bool:
+    """Read a boolean switch that can never be re-enabled by the environment.
+
+    Behaves like :func:`_env_bool`, with one addition: when the project's
+    ``.env`` file explicitly disables the switch, that decision wins. This
+    keeps the documented fail-safe behaviour of
+    :data:`_FAIL_CLOSED_SWITCHES` even when a stale variable is inherited
+    from the surrounding shell.
+    """
+    value = _env_bool(name, default)
+
+    file_raw = _dotenv_raw(name)
+    if (
+        file_raw is not None
+        and file_raw.strip()
+        and file_raw.strip().lower() not in _TRUTHY
+    ):
+        # Explicitly disabled in .env - the environment cannot undo it.
+        return False
+
+    return value
 
 
 def _env_int(name: str, default: int) -> int:
@@ -72,13 +131,17 @@ def get_config() -> dict:
         # PROJECT_SPEC.md §9.3: a sandbox failure must be BLOCKED, never a
         # silent fallback to executing target code on the host. Opt in
         # explicitly (and knowingly) if you want the local runner.
-        "FIXPILOT_ALLOW_UNSAFE_LOCAL_EXECUTION": _env_bool(
+        # These two switches are read "fail closed": an explicit `false` in
+        # the project's .env always wins over an inherited shell variable.
+        "FIXPILOT_ALLOW_UNSAFE_LOCAL_EXECUTION": _env_bool_fail_closed(
             "FIXPILOT_ALLOW_UNSAFE_LOCAL_EXECUTION", False
         ),
         # Backwards compatible alias for the previous option name. It means
         # exactly the same thing: allow the target project's code to run
         # directly on this host machine.
-        "FIXPILOT_ALLOW_LOCAL_RUNNER": _env_bool("FIXPILOT_ALLOW_LOCAL_RUNNER", False),
+        "FIXPILOT_ALLOW_LOCAL_RUNNER": _env_bool_fail_closed(
+            "FIXPILOT_ALLOW_LOCAL_RUNNER", False
+        ),
         # Network access for sandboxed runs is opt-in and off by default.
         "FIXPILOT_ALLOW_NETWORK": _env_bool("FIXPILOT_ALLOW_NETWORK", False),
         # Dependency installation is a separate, explicitly enabled phase.
